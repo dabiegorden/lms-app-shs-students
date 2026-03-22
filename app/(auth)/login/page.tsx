@@ -1,5 +1,7 @@
 "use client";
+
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 // ─── Eye Icon ────────────────────────────────────────────────────────────────
@@ -42,40 +44,84 @@ function EyeIcon({ open }: { open: boolean }) {
   );
 }
 
+// ─── Spinner ──────────────────────────────────────────────────────────────────
+function Spinner() {
+  return (
+    <svg
+      className="animate-spin w-4 h-4 shrink-0"
+      fill="none"
+      viewBox="0 0 24 24"
+    >
+      <circle
+        className="opacity-25"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="4"
+      />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+      />
+    </svg>
+  );
+}
+
 // ─── Login Page ───────────────────────────────────────────────────────────────
 export default function LoginPage() {
+  const router = useRouter();
+
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [form, setForm] = useState({ email: "", password: "" });
 
+  const isFormIncomplete = !form.email || !form.password;
+
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setForm({ ...form, [e.target.name]: e.target.value });
+    // Clear error as user types so it doesn't feel sticky
     if (error) setError("");
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isFormIncomplete) return;
+
     setLoading(true);
     setError("");
-    try {
-      // TODO: Connect to API
-      // const res = await fetch("/api/auth/login", {
-      //   method: "POST",
-      //   headers: { "Content-Type": "application/json" },
-      //   body: JSON.stringify(form),
-      // });
-      // const data = await res.json();
-      // if (!res.ok) throw new Error(data.message);
-      //
-      // API will return role in the token/response.
-      // Route accordingly:
-      // if (data.user.role === "instructor") router.push("/instructor/dashboard");
-      // else router.push("/dashboard");
 
-      await new Promise((r) => setTimeout(r, 1000)); // mock delay — remove when API is connected
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: form.email.trim(),
+          password: form.password,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.message || "Login failed. Please try again.");
+      }
+
+      // ── Route based on role returned from the API ──────────────────────
+      // The API returns data.user.role which is either "student" or "instructor"
+      const role = data.user?.role;
+
+      router.refresh(); // Force server components to re-read the new cookie
+
+      if (role === "instructor") {
+        router.push("/instructor-dashboard");
+      } else {
+        router.push("/dashboard");
+      }
     } catch (err: any) {
-      setError(err.message || "Invalid email or password. Please try again.");
+      setError(err.message || "Something went wrong. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -114,16 +160,16 @@ export default function LoginPage() {
             </p>
           </div>
 
-          {/* Form Body */}
+          {/* Form */}
           <form
             onSubmit={handleSubmit}
             className="px-6 py-6 flex flex-col gap-5"
           >
-            {/* Error Banner */}
+            {/* ── API Error Banner ─────────────────────────────────────── */}
             {error && (
-              <div className="bg-red-50 border border-red-200 text-red-600 text-xs font-semibold rounded-xl px-4 py-3 flex items-center gap-2 animate-pulse">
-                <span className="text-base shrink-0">⚠️</span>
-                {error}
+              <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-semibold rounded-xl px-4 py-3 flex items-start gap-2">
+                <span className="text-base shrink-0 mt-0.5">⚠️</span>
+                <span>{error}</span>
               </div>
             )}
 
@@ -144,7 +190,8 @@ export default function LoginPage() {
                 placeholder="e.g. kofi@school.edu.gh"
                 required
                 autoComplete="email"
-                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                disabled={loading}
+                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed"
               />
             </div>
 
@@ -168,13 +215,15 @@ export default function LoginPage() {
                   placeholder="Enter your password"
                   required
                   autoComplete="current-password"
-                  className="w-full border border-slate-200 rounded-xl px-4 py-3 pr-12 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                  disabled={loading}
+                  className="w-full border border-slate-200 rounded-xl px-4 py-3 pr-12 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed"
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword((p) => !p)}
                   className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-blue-600 transition-colors p-0.5"
                   aria-label={showPassword ? "Hide password" : "Show password"}
+                  tabIndex={-1}
                 >
                   <EyeIcon open={showPassword} />
                 </button>
@@ -195,30 +244,12 @@ export default function LoginPage() {
             {/* Submit */}
             <button
               type="submit"
-              disabled={loading || !form.email || !form.password}
+              disabled={loading || isFormIncomplete}
               className="w-full bg-linear-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all text-sm flex items-center justify-center gap-2"
             >
               {loading ? (
                 <>
-                  <svg
-                    className="animate-spin w-4 h-4 shrink-0"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                  >
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                    />
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
-                    />
-                  </svg>
+                  <Spinner />
                   Signing in…
                 </>
               ) : (
@@ -235,7 +266,7 @@ export default function LoginPage() {
               <div className="flex-1 h-px bg-slate-100" />
             </div>
 
-            {/* Register CTA */}
+            {/* Register CTA — students only */}
             <Link
               href="/register"
               className="w-full flex items-center justify-center gap-2 border-2 border-blue-100 hover:border-blue-300 hover:bg-blue-50 text-blue-700 font-bold py-3 rounded-xl transition-all text-sm"
@@ -245,13 +276,13 @@ export default function LoginPage() {
           </form>
         </div>
 
-        {/* Instructor note */}
-        <div className="mt-5 bg-white/60 border border-slate-200 rounded-2xl px-4 py-3.5 flex items-start gap-3">
+        {/* Instructor hint — subtle, no separate login page */}
+        <div className="mt-5 bg-white/70 border border-slate-200 rounded-2xl px-4 py-3.5 flex items-start gap-3">
           <span className="text-lg mt-0.5 shrink-0">👨‍🏫</span>
           <p className="text-xs text-slate-500 leading-relaxed">
             <span className="font-bold text-slate-700">Are you a teacher?</span>{" "}
-            Instructor accounts are set up by your school. Use the credentials
-            provided to sign in above.
+            Instructor accounts are created by your school administrator. Use
+            the credentials they provided to sign in above.
           </p>
         </div>
 

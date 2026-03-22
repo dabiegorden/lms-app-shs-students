@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 // ─── Eye Icon ────────────────────────────────────────────────────────────────
@@ -43,6 +44,31 @@ function EyeIcon({ open }: { open: boolean }) {
   );
 }
 
+// ─── Spinner ──────────────────────────────────────────────────────────────────
+function Spinner() {
+  return (
+    <svg
+      className="animate-spin w-4 h-4 shrink-0"
+      fill="none"
+      viewBox="0 0 24 24"
+    >
+      <circle
+        className="opacity-25"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="4"
+      />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+      />
+    </svg>
+  );
+}
+
 // ─── Password Strength Bar ────────────────────────────────────────────────────
 function PasswordStrength({ password }: { password: string }) {
   const checks = [
@@ -61,7 +87,6 @@ function PasswordStrength({ password }: { password: string }) {
 
   return (
     <div className="mt-1.5 flex flex-col gap-2">
-      {/* Bar */}
       <div className="flex gap-1">
         {[0, 1, 2].map((i) => (
           <div
@@ -72,13 +97,14 @@ function PasswordStrength({ password }: { password: string }) {
           />
         ))}
       </div>
-      {/* Labels */}
       <div className="flex items-center justify-between">
         <div className="flex gap-3">
           {checks.map((c) => (
             <span
               key={c.label}
-              className={`text-[10px] font-semibold flex items-center gap-0.5 transition-colors ${c.pass ? "text-green-600" : "text-slate-400"}`}
+              className={`text-[10px] font-semibold flex items-center gap-0.5 transition-colors ${
+                c.pass ? "text-green-600" : "text-slate-400"
+              }`}
             >
               <span>{c.pass ? "✓" : "·"}</span> {c.label}
             </span>
@@ -97,9 +123,15 @@ function PasswordStrength({ password }: { password: string }) {
 }
 
 // ─── Register Page ────────────────────────────────────────────────────────────
-export default function StudentRegisterPage() {
+export default function RegisterPage() {
+  const router = useRouter();
+
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
   const [form, setForm] = useState({
     name: "",
     email: "",
@@ -110,22 +142,76 @@ export default function StudentRegisterPage() {
     confirmPassword: "",
   });
 
-  const handleChange = (
-    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>,
-  ) => {
-    setForm({ ...form, [e.target.name]: e.target.value });
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    // TODO: Connect to API
-    console.log("Register payload:", form);
-  };
-
   const passwordMatch =
     form.confirmPassword.length > 0 && form.password === form.confirmPassword;
   const passwordMismatch =
     form.confirmPassword.length > 0 && form.password !== form.confirmPassword;
+
+  // Disable submit if passwords mismatch OR any required field is empty
+  const isFormIncomplete =
+    !form.name ||
+    !form.email ||
+    !form.school ||
+    !form.classLevel ||
+    !form.programme ||
+    !form.password ||
+    !form.confirmPassword ||
+    passwordMismatch;
+
+  const handleChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>,
+  ) => {
+    setForm({ ...form, [e.target.name]: e.target.value });
+    // Clear any previous error as user types
+    if (error) setError("");
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isFormIncomplete) return;
+
+    setLoading(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const res = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // confirmPassword is only needed client-side for validation; don't send it
+        body: JSON.stringify({
+          name: form.name.trim(),
+          email: form.email.trim(),
+          school: form.school.trim(),
+          classLevel: form.classLevel,
+          programme: form.programme,
+          password: form.password,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        // Surface the exact message from the API (e.g. "email already exists")
+        throw new Error(
+          data.message || "Registration failed. Please try again.",
+        );
+      }
+
+      // ── Success ────────────────────────────────────────────────────────
+      setSuccess("Account created! Redirecting to your dashboard…");
+
+      // Small delay so the user sees the success message before navigation
+      setTimeout(() => {
+        router.push("/dashboard");
+        router.refresh(); // Ensure server components pick up the new cookie
+      }, 1200);
+    } catch (err: any) {
+      setError(err.message || "Something went wrong. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-linear-to-br from-blue-50 via-indigo-50 to-slate-100 flex items-center justify-center p-4 py-10">
@@ -165,6 +251,22 @@ export default function StudentRegisterPage() {
             onSubmit={handleSubmit}
             className="px-6 py-6 flex flex-col gap-4"
           >
+            {/* ── API Error Banner ─────────────────────────────────────── */}
+            {error && (
+              <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-semibold rounded-xl px-4 py-3 flex items-start gap-2">
+                <span className="text-base shrink-0 mt-0.5">⚠️</span>
+                <span>{error}</span>
+              </div>
+            )}
+
+            {/* ── Success Banner ───────────────────────────────────────── */}
+            {success && (
+              <div className="bg-green-50 border border-green-200 text-green-700 text-xs font-semibold rounded-xl px-4 py-3 flex items-center gap-2">
+                <span className="text-base shrink-0">✅</span>
+                <span>{success}</span>
+              </div>
+            )}
+
             {/* Full Name */}
             <div className="flex flex-col gap-1.5">
               <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
@@ -177,7 +279,8 @@ export default function StudentRegisterPage() {
                 onChange={handleChange}
                 placeholder="e.g. Kofi Mensah"
                 required
-                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                disabled={loading}
+                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed"
               />
             </div>
 
@@ -193,7 +296,9 @@ export default function StudentRegisterPage() {
                 onChange={handleChange}
                 placeholder="your.email@school.edu.gh"
                 required
-                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                autoComplete="email"
+                disabled={loading}
+                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed"
               />
             </div>
 
@@ -208,12 +313,13 @@ export default function StudentRegisterPage() {
                   value={form.classLevel}
                   onChange={handleChange}
                   required
-                  className="w-full border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white"
+                  disabled={loading}
+                  className="w-full border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   <option value="">Select</option>
-                  <option>SHS 1</option>
-                  <option>SHS 2</option>
-                  <option>SHS 3</option>
+                  <option value="SHS 1">SHS 1</option>
+                  <option value="SHS 2">SHS 2</option>
+                  <option value="SHS 3">SHS 3</option>
                 </select>
               </div>
               <div className="flex flex-col gap-1.5">
@@ -225,13 +331,14 @@ export default function StudentRegisterPage() {
                   value={form.programme}
                   onChange={handleChange}
                   required
-                  className="w-full border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white"
+                  disabled={loading}
+                  className="w-full border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   <option value="">Select</option>
-                  <option>General Science</option>
-                  <option>Business</option>
-                  <option>Visual Arts</option>
-                  <option>General Arts</option>
+                  <option value="General Science">General Science</option>
+                  <option value="Business">Business</option>
+                  <option value="Visual Arts">Visual Arts</option>
+                  <option value="General Arts">General Arts</option>
                 </select>
               </div>
             </div>
@@ -248,7 +355,8 @@ export default function StudentRegisterPage() {
                 onChange={handleChange}
                 placeholder="e.g. Presec-Legon"
                 required
-                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                disabled={loading}
+                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed"
               />
             </div>
 
@@ -265,13 +373,16 @@ export default function StudentRegisterPage() {
                   onChange={handleChange}
                   placeholder="Create a strong password"
                   required
-                  className="w-full border border-slate-200 rounded-xl px-4 py-3 pr-11 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                  autoComplete="new-password"
+                  disabled={loading}
+                  className="w-full border border-slate-200 rounded-xl px-4 py-3 pr-11 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed"
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword((p) => !p)}
                   className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-blue-600 transition-colors"
                   aria-label={showPassword ? "Hide password" : "Show password"}
+                  tabIndex={-1}
                 >
                   <EyeIcon open={showPassword} />
                 </button>
@@ -292,7 +403,9 @@ export default function StudentRegisterPage() {
                   onChange={handleChange}
                   placeholder="Re-enter your password"
                   required
-                  className={`w-full border rounded-xl px-4 py-3 pr-11 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:border-transparent transition-all ${
+                  autoComplete="new-password"
+                  disabled={loading}
+                  className={`w-full border rounded-xl px-4 py-3 pr-11 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
                     passwordMismatch
                       ? "border-red-300 focus:ring-red-400 bg-red-50/40"
                       : passwordMatch
@@ -305,6 +418,7 @@ export default function StudentRegisterPage() {
                   onClick={() => setShowConfirm((p) => !p)}
                   className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-blue-600 transition-colors"
                   aria-label={showConfirm ? "Hide password" : "Show password"}
+                  tabIndex={-1}
                 >
                   <EyeIcon open={showConfirm} />
                 </button>
@@ -327,10 +441,17 @@ export default function StudentRegisterPage() {
             {/* Submit */}
             <button
               type="submit"
-              disabled={passwordMismatch}
-              className="w-full bg-linear-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all text-sm"
+              disabled={loading || isFormIncomplete}
+              className="w-full bg-linear-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all text-sm flex items-center justify-center gap-2"
             >
-              🎓 Create Student Account
+              {loading ? (
+                <>
+                  <Spinner />
+                  Creating account…
+                </>
+              ) : (
+                "🎓 Create Student Account"
+              )}
             </button>
 
             <p className="text-center text-xs text-slate-500 pb-1">

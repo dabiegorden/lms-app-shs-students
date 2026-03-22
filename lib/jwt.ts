@@ -7,7 +7,7 @@ const JWT_SECRET = process.env.JWT_SECRET;
 export interface JWTPayload {
   userId: string;
   email: string;
-  role: "students" | "instructor";
+  role: "student" | "instructor";
 }
 
 export function generateToken(payload: JWTPayload): string {
@@ -21,8 +21,4 @@ export function verifyToken(token: string): JWTPayload | null {
   } catch (error) {
     return null;
   }
-}
-
-export function generateRefreshToken(payload: JWTPayload): string {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: "30d" });
 }
