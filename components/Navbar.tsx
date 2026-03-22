@@ -63,7 +63,7 @@ export default function Navbar() {
   };
 
   const dashboardHref =
-    user?.role === "instructor" ? "/instructor/dashboard" : "/dashboard";
+    user?.role === "instructor" ? "/instructor-dashboard" : "/dashboard";
 
   return (
     <nav className="fixed top-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-md border-b border-blue-100 shadow-sm">
