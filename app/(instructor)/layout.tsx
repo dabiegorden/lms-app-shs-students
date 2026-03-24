@@ -44,6 +44,7 @@ const navItems = [
     label: "Announcements",
     href: "/instructor-dashboard/announcements",
   },
+  { icon: "👤", label: "All Students", href: "/instructor-dashboard/students" },
   {
     icon: "📈",
     label: "Performance",

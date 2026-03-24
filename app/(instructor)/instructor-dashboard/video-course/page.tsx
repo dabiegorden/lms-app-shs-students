@@ -189,7 +189,6 @@ function EmptyState({ filtered }: { filtered: boolean }) {
 }
 
 // ─── Bullet List Editor ───────────────────────────────────────────────────────
-// Reusable component for whatYouWillLearn / requirements / targetAudience
 function BulletListEditor({
   label,
   placeholder,
@@ -279,7 +278,6 @@ function LessonRow({
 
   const handleUrlBlur = (url: string) => {
     const id = extractYouTubeId(url);
-
     if (id) {
       onUpdate({ youtubeUrl: url, youtubeVideoId: id });
     } else {
@@ -297,7 +295,6 @@ function LessonRow({
           {lessonIdx + 1}.
         </span>
 
-        {/* Drag handle / reorder */}
         <div className="flex flex-col gap-0.5 shrink-0">
           <button
             type="button"
@@ -317,7 +314,6 @@ function LessonRow({
           </button>
         </div>
 
-        {/* Video thumbnail mini */}
         {videoId ? (
           <div className="w-10 h-7 rounded-md overflow-hidden shrink-0 bg-slate-200">
             <YTThumb videoId={videoId} className="w-full h-full object-cover" />
@@ -577,7 +573,6 @@ function CurriculumBuilder({
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Curriculum summary */}
       {sections.length > 0 && (
         <div className="flex items-center gap-3 text-xs font-semibold text-slate-500 bg-slate-50 rounded-xl px-4 py-2.5 border border-slate-100">
           <span className="font-bold text-slate-700">{sections.length}</span>{" "}
@@ -602,7 +597,6 @@ function CurriculumBuilder({
             key={sIdx}
             className="border-2 border-slate-100 rounded-2xl overflow-hidden"
           >
-            {/* Section header */}
             <div className="flex items-center gap-2 bg-slate-50 px-4 py-3">
               <span className="text-xs font-black text-slate-400 shrink-0">
                 S{sIdx + 1}
@@ -661,7 +655,6 @@ function CurriculumBuilder({
               </div>
             </div>
 
-            {/* Lessons */}
             {!isCollapsed && (
               <div className="p-3 flex flex-col gap-2">
                 {section.lessons.map((lesson, lIdx) => (
@@ -692,7 +685,6 @@ function CurriculumBuilder({
         );
       })}
 
-      {/* Add section button */}
       <button
         type="button"
         onClick={addSection}
@@ -724,7 +716,6 @@ function CourseModal({
   const [activeTab, setActiveTab] = useState<ModalTab>("basics");
   const thumbnailInputRef = useRef<HTMLInputElement>(null);
 
-  // ── Form state ─────────────────────────────────────────────────────────────
   const [title, setTitle] = useState(course?.title ?? "");
   const [subject, setSubject] = useState(course?.subject ?? "");
   const [topic, setTopic] = useState(course?.topic ?? "");
@@ -785,7 +776,6 @@ function CourseModal({
     { id: "details", label: "Details", icon: "⚙️" },
   ];
 
-  // Validate per-tab before allowing submit
   const validate = (): boolean => {
     if (!title.trim()) {
       toast.error("Course title is required.");
@@ -902,7 +892,6 @@ function CourseModal({
             {/* ── BASICS TAB ──────────────────────────────────────────────── */}
             {activeTab === "basics" && (
               <>
-                {/* Thumbnail */}
                 <div className="flex flex-col gap-2">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
                     Course Thumbnail{" "}
@@ -911,7 +900,6 @@ function CourseModal({
                     </span>
                   </label>
                   <div className="flex gap-4 items-start">
-                    {/* Preview */}
                     <div
                       className={`w-48 h-28 rounded-2xl overflow-hidden border-2 border-dashed flex items-center justify-center shrink-0 cursor-pointer transition-all ${dragOver ? "border-sky-400 bg-sky-50" : thumbnailPreview ? "border-sky-200" : "border-slate-200 hover:border-sky-300 bg-slate-50"}`}
                       onClick={() => thumbnailInputRef.current?.click()}
@@ -987,7 +975,6 @@ function CourseModal({
                   </div>
                 </div>
 
-                {/* Title */}
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
                     Course Title <span className="text-red-400">*</span>
@@ -1001,7 +988,6 @@ function CourseModal({
                   />
                 </div>
 
-                {/* Subject + Class Level */}
                 <div className="grid grid-cols-2 gap-3">
                   <div className="flex flex-col gap-1.5">
                     <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
@@ -1040,7 +1026,6 @@ function CourseModal({
                   </div>
                 </div>
 
-                {/* Topic */}
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
                     Topic
@@ -1054,7 +1039,6 @@ function CourseModal({
                   />
                 </div>
 
-                {/* Short description */}
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
                     Short Description <span className="text-red-400">*</span>
@@ -1076,7 +1060,6 @@ function CourseModal({
                   </p>
                 </div>
 
-                {/* Preview video */}
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
                     Course Preview Video{" "}
@@ -1130,7 +1113,6 @@ function CourseModal({
             {/* ── DETAILS TAB ──────────────────────────────────────────────── */}
             {activeTab === "details" && (
               <>
-                {/* Level + Language + Status */}
                 <div className="grid grid-cols-3 gap-3">
                   <div className="flex flex-col gap-1.5">
                     <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
@@ -1185,7 +1167,6 @@ function CourseModal({
                   </div>
                 </div>
 
-                {/* Certificate toggle */}
                 <div className="flex items-center gap-4 bg-amber-50 border border-amber-100 rounded-2xl px-4 py-4">
                   <div className="text-3xl shrink-0">🏆</div>
                   <div className="flex-1">
@@ -1214,7 +1195,6 @@ function CourseModal({
                   </button>
                 </div>
 
-                {/* Overview */}
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
                     Full Course Overview{" "}
@@ -1232,7 +1212,6 @@ function CourseModal({
                   />
                 </div>
 
-                {/* What you'll learn */}
                 <BulletListEditor
                   label="What Students Will Learn"
                   placeholder="e.g. Solve quadratic equations confidently"
@@ -1241,7 +1220,6 @@ function CourseModal({
                   disabled={saving}
                 />
 
-                {/* Requirements */}
                 <BulletListEditor
                   label="Requirements / Prerequisites"
                   placeholder="e.g. Basic algebra knowledge"
@@ -1250,7 +1228,6 @@ function CourseModal({
                   disabled={saving}
                 />
 
-                {/* Target audience */}
                 <BulletListEditor
                   label="Target Audience"
                   placeholder="e.g. SHS 2 students preparing for WASSCE"
@@ -1265,7 +1242,7 @@ function CourseModal({
           {/* Sticky footer */}
           <div className="sticky bottom-0 bg-white border-t border-slate-100 px-6 py-4 flex items-center justify-between gap-3 shrink-0">
             <div className="flex gap-2">
-              {TABS.map((tab, idx) => (
+              {TABS.map((tab) => (
                 <button
                   key={tab.id}
                   type="button"
@@ -1538,7 +1515,8 @@ function DeleteConfirm({
 }
 
 // ─── Course Player Modal ──────────────────────────────────────────────────────
-// Full Udemy-style player: sidebar curriculum + embedded YouTube player
+// Mobile-first: video on top, curriculum list below (collapsible on mobile).
+// On desktop: side-by-side layout is restored.
 function CoursePlayerModal({
   course,
   onClose,
@@ -1551,9 +1529,10 @@ function CoursePlayerModal({
   const [collapsedSections, setCollapsedSections] = useState<Set<number>>(
     new Set(),
   );
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // On mobile the curriculum panel is toggled via a bottom sheet button.
+  // On desktop it remains as a sidebar.
+  const [curriculumOpen, setCurriculumOpen] = useState(false);
 
-  // Pick the first available lesson on mount
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -1598,12 +1577,13 @@ function CoursePlayerModal({
   const goTo = (entry: { lesson: Lesson; sectionIdx: number }) => {
     setActiveLesson(entry.lesson);
     setActiveSectionIdx(entry.sectionIdx);
-    // Auto-expand the target section
     setCollapsedSections((prev) => {
       const next = new Set(prev);
       next.delete(entry.sectionIdx);
       return next;
     });
+    // Close curriculum panel on mobile after selecting a lesson
+    setCurriculumOpen(false);
   };
 
   const toggleSection = (idx: number) => {
@@ -1621,22 +1601,187 @@ function CoursePlayerModal({
     0,
   );
 
+  // ── Curriculum panel (shared between sidebar on desktop and sheet on mobile)
+  const CurriculumPanel = () => (
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* Panel header */}
+      <div className="px-4 py-3.5 border-b border-slate-800 shrink-0 flex items-center justify-between">
+        <div>
+          <h3 className="font-black text-white text-sm">Course Curriculum</h3>
+          <p className="text-slate-400 text-xs mt-0.5">
+            {totalLessons} lesson{totalLessons !== 1 ? "s" : ""} ·{" "}
+            {formatDuration(totalDuration)}
+          </p>
+        </div>
+        {/* Close button visible only on mobile panel */}
+        <button
+          onClick={() => setCurriculumOpen(false)}
+          className="md:hidden w-7 h-7 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 flex items-center justify-center text-xs font-bold"
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Sections list */}
+      <div className="flex-1 overflow-y-auto">
+        {(course.sections ?? []).length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
+            <span className="text-3xl mb-2 opacity-30">📋</span>
+            <p className="text-slate-500 text-xs">No sections yet</p>
+          </div>
+        ) : (
+          (course.sections ?? []).map((section, sIdx) => {
+            const isCollapsed = collapsedSections.has(sIdx);
+            const secDuration = section.lessons.reduce(
+              (s, l) => s + (l.durationSeconds || 0),
+              0,
+            );
+            const isActiveSection = sIdx === activeSectionIdx;
+
+            return (
+              <div key={sIdx} className="border-b border-slate-800">
+                {/* Section header */}
+                <button
+                  type="button"
+                  onClick={() => toggleSection(sIdx)}
+                  className={`w-full flex items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-slate-800/50 ${isActiveSection ? "bg-slate-800/30" : ""}`}
+                >
+                  <span
+                    className={`text-xs font-black shrink-0 w-5 h-5 rounded-full flex items-center justify-center transition-colors ${isActiveSection ? "bg-sky-600 text-white" : "bg-slate-700 text-slate-400"}`}
+                  >
+                    {sIdx + 1}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p
+                      className={`text-xs font-bold truncate ${isActiveSection ? "text-sky-400" : "text-slate-200"}`}
+                    >
+                      {section.title || `Section ${sIdx + 1}`}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {section.lessons.length} lesson
+                      {section.lessons.length !== 1 ? "s" : ""}
+                      {secDuration > 0 && ` · ${formatDuration(secDuration)}`}
+                    </p>
+                  </div>
+                  <span className="text-slate-500 text-xs shrink-0">
+                    {isCollapsed ? "▶" : "▼"}
+                  </span>
+                </button>
+
+                {/* Lessons list */}
+                {!isCollapsed && (
+                  <div className="bg-slate-950/40">
+                    {section.lessons.length === 0 ? (
+                      <p className="text-xs text-slate-600 italic px-10 py-3">
+                        No lessons
+                      </p>
+                    ) : (
+                      section.lessons.map((lesson, lIdx) => {
+                        const isActive =
+                          activeLesson?.title === lesson.title &&
+                          activeLesson?.youtubeVideoId ===
+                            lesson.youtubeVideoId;
+                        const hasVideo = !!lesson.youtubeVideoId;
+
+                        return (
+                          <button
+                            key={lIdx}
+                            type="button"
+                            onClick={() =>
+                              hasVideo && goTo({ lesson, sectionIdx: sIdx })
+                            }
+                            className={`w-full flex items-start gap-3 px-4 py-3 text-left transition-colors border-t border-slate-800/50 ${
+                              isActive
+                                ? "bg-sky-900/30 border-l-2 border-l-sky-500"
+                                : hasVideo
+                                  ? "hover:bg-slate-800/40 cursor-pointer"
+                                  : "opacity-40 cursor-not-allowed"
+                            }`}
+                          >
+                            {/* Play icon / index */}
+                            <div
+                              className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 mt-0.5 transition-colors ${
+                                isActive
+                                  ? "bg-sky-600 text-white"
+                                  : hasVideo
+                                    ? "bg-slate-700 text-slate-300"
+                                    : "bg-slate-800 text-slate-600"
+                              }`}
+                            >
+                              {isActive ? (
+                                <span className="text-xs">▶</span>
+                              ) : (
+                                <span className="text-xs font-bold">
+                                  {lIdx + 1}
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Lesson details */}
+                            <div className="flex-1 min-w-0">
+                              <p
+                                className={`text-xs font-semibold leading-snug ${isActive ? "text-sky-300" : "text-slate-300"}`}
+                              >
+                                {lesson.title || `Lesson ${lIdx + 1}`}
+                              </p>
+                              <div className="flex items-center gap-2 mt-1 flex-wrap">
+                                {lesson.durationSeconds > 0 && (
+                                  <span className="text-xs text-slate-500">
+                                    {formatDuration(lesson.durationSeconds)}
+                                  </span>
+                                )}
+                                {lesson.isFree && (
+                                  <span className="text-xs font-bold text-emerald-500">
+                                    Free
+                                  </span>
+                                )}
+                                {!hasVideo && (
+                                  <span className="text-xs text-slate-600 italic">
+                                    No video
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* YT mini thumb */}
+                            {lesson.youtubeVideoId && !isActive && (
+                              <div className="w-12 h-8 rounded-lg overflow-hidden shrink-0 opacity-60">
+                                <YTThumb
+                                  videoId={lesson.youtubeVideoId}
+                                  className="w-full h-full object-cover"
+                                />
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-slate-950">
       {/* ── Top bar ─────────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-3 px-4 py-3 bg-slate-900 border-b border-slate-800 shrink-0">
+      <div className="flex items-center gap-2 px-3 py-2.5 md:px-4 md:py-3 bg-slate-900 border-b border-slate-800 shrink-0">
         <button
           onClick={onClose}
-          className="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center font-bold transition-colors text-sm"
+          className="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center font-bold transition-colors text-sm shrink-0"
         >
           ✕
         </button>
         <div className="flex-1 min-w-0">
-          <p className="font-black text-white text-sm truncate">
+          <p className="font-black text-white text-xs md:text-sm truncate">
             {course.title}
           </p>
           {activeLesson && (
-            <p className="text-slate-400 text-xs truncate">
+            <p className="text-slate-400 text-xs truncate hidden sm:block">
               {activeLesson.title}
               {activeLesson.durationSeconds > 0 && (
                 <span className="ml-2">
@@ -1646,27 +1791,34 @@ function CoursePlayerModal({
             </p>
           )}
         </div>
-        <div className="flex items-center gap-2 shrink-0 text-xs text-slate-400 font-medium">
-          <span>{totalLessons} lessons</span>
-          <span className="text-slate-600">·</span>
-          <span>{formatDuration(totalDuration)}</span>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-xs text-slate-400 font-medium hidden sm:block">
+            {totalLessons} lessons · {formatDuration(totalDuration)}
+          </span>
+          {/* Curriculum toggle — visible on all sizes but styled differently */}
+          <button
+            onClick={() => setCurriculumOpen((p) => !p)}
+            className="flex items-center gap-1.5 text-xs font-bold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-3 py-2 rounded-xl transition-colors"
+          >
+            <span>📋</span>
+            <span className="hidden sm:inline">Curriculum</span>
+          </button>
         </div>
-        {/* Sidebar toggle */}
-        <button
-          onClick={() => setSidebarOpen((p) => !p)}
-          className="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center transition-colors text-xs font-bold"
-          title={sidebarOpen ? "Hide curriculum" : "Show curriculum"}
-        >
-          {sidebarOpen ? "▶" : "◀"}
-        </button>
       </div>
 
-      {/* ── Body: player + sidebar ───────────────────────────────────────────── */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* ── Video pane ──────────────────────────────────────────────────── */}
-        <div className="flex-1 flex flex-col bg-black overflow-hidden">
-          {/* YouTube embed */}
-          <div className="relative w-full" style={{ paddingBottom: "56.25%" }}>
+      {/* ── Body ────────────────────────────────────────────────────────────── */}
+      {/*
+        Mobile  : single column — video on top, lesson info below, curriculum as overlay
+        Desktop : side-by-side — video+info on left, curriculum sidebar on right
+      */}
+      <div className="flex flex-1 overflow-hidden relative">
+        {/* ── Left / main pane ──────────────────────────────────────────────── */}
+        <div className="flex-1 flex flex-col overflow-y-auto md:overflow-hidden bg-black">
+          {/* Video embed — responsive 16:9 */}
+          <div
+            className="relative w-full bg-black shrink-0"
+            style={{ paddingBottom: "56.25%" }}
+          >
             {activeLesson?.youtubeVideoId ? (
               <iframe
                 key={activeLesson.youtubeVideoId}
@@ -1689,7 +1841,7 @@ function CoursePlayerModal({
                 ) : (
                   <>
                     <span className="text-5xl opacity-30">🎬</span>
-                    <p className="text-slate-400 text-sm font-medium">
+                    <p className="text-slate-400 text-sm font-medium text-center px-4">
                       {totalLessons === 0
                         ? "No lessons added to this course yet"
                         : "Select a lesson from the curriculum to start watching"}
@@ -1700,8 +1852,8 @@ function CoursePlayerModal({
             )}
           </div>
 
-          {/* Lesson info + navigation */}
-          <div className="flex-1 overflow-y-auto bg-slate-950 px-6 py-5 flex flex-col gap-4">
+          {/* Lesson info + navigation — scrollable on mobile */}
+          <div className="bg-slate-950 px-4 py-4 md:px-6 md:py-5 flex flex-col gap-4 md:flex-1 md:overflow-y-auto">
             {activeLesson ? (
               <>
                 {/* Navigation row */}
@@ -1729,10 +1881,10 @@ function CoursePlayerModal({
 
                 {/* Lesson title + meta */}
                 <div>
-                  <h2 className="text-white font-black text-lg leading-snug">
+                  <h2 className="text-white font-black text-base md:text-lg leading-snug">
                     {activeLesson.title}
                   </h2>
-                  <div className="flex items-center gap-3 mt-2 flex-wrap">
+                  <div className="flex items-center gap-2 mt-2 flex-wrap">
                     {activeLesson.durationSeconds > 0 && (
                       <span className="text-xs text-slate-400 bg-slate-800 px-2.5 py-1 rounded-full font-medium">
                         ⏱ {formatDuration(activeLesson.durationSeconds)}
@@ -1743,22 +1895,20 @@ function CoursePlayerModal({
                         Free Preview
                       </span>
                     )}
-                    <span className="text-xs text-slate-500">
-                      {course.sections?.[activeSectionIdx]?.title && (
-                        <>
-                          Section:{" "}
-                          <span className="text-slate-300 font-medium">
-                            {course.sections[activeSectionIdx].title}
-                          </span>
-                        </>
-                      )}
-                    </span>
+                    {course.sections?.[activeSectionIdx]?.title && (
+                      <span className="text-xs text-slate-500">
+                        Section:{" "}
+                        <span className="text-slate-300 font-medium">
+                          {course.sections[activeSectionIdx].title}
+                        </span>
+                      </span>
+                    )}
                   </div>
                 </div>
 
                 {/* Description */}
                 {activeLesson.description && (
-                  <div className="bg-slate-900 rounded-2xl px-5 py-4 border border-slate-800">
+                  <div className="bg-slate-900 rounded-2xl px-4 py-4 border border-slate-800">
                     <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
                       About this lesson
                     </p>
@@ -1781,175 +1931,194 @@ function CoursePlayerModal({
                 )}
               </>
             ) : (
-              <div className="flex flex-col items-center justify-center flex-1 py-12 text-center">
+              <div className="flex flex-col items-center justify-center py-10 text-center">
                 <span className="text-4xl mb-3 opacity-30">📚</span>
                 <p className="text-slate-400 text-sm">
                   Select a lesson from the curriculum to begin
                 </p>
               </div>
             )}
+
+            {/* ── Mobile-only inline curriculum ──────────────────────────────
+                On mobile, after the lesson info we render all lessons inline
+                so the user can scroll down and tap without needing a sidebar.
+            ── */}
+            <div className="md:hidden mt-2">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-black text-white text-sm">
+                  Course Curriculum
+                </h3>
+                <span className="text-xs text-slate-400">
+                  {totalLessons} lessons · {formatDuration(totalDuration)}
+                </span>
+              </div>
+
+              {(course.sections ?? []).length === 0 ? (
+                <p className="text-slate-500 text-xs text-center py-6">
+                  No sections yet
+                </p>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {(course.sections ?? []).map((section, sIdx) => {
+                    const isCollapsed = collapsedSections.has(sIdx);
+                    const secDuration = section.lessons.reduce(
+                      (s, l) => s + (l.durationSeconds || 0),
+                      0,
+                    );
+                    const isActiveSection = sIdx === activeSectionIdx;
+
+                    return (
+                      <div
+                        key={sIdx}
+                        className="rounded-2xl overflow-hidden border border-slate-800"
+                      >
+                        {/* Section header */}
+                        <button
+                          type="button"
+                          onClick={() => toggleSection(sIdx)}
+                          className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors ${isActiveSection ? "bg-slate-800" : "bg-slate-900 hover:bg-slate-800/60"}`}
+                        >
+                          <span
+                            className={`text-xs font-black shrink-0 w-5 h-5 rounded-full flex items-center justify-center ${isActiveSection ? "bg-sky-600 text-white" : "bg-slate-700 text-slate-400"}`}
+                          >
+                            {sIdx + 1}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p
+                              className={`text-xs font-bold truncate ${isActiveSection ? "text-sky-400" : "text-slate-200"}`}
+                            >
+                              {section.title || `Section ${sIdx + 1}`}
+                            </p>
+                            <p className="text-xs text-slate-500 mt-0.5">
+                              {section.lessons.length} lesson
+                              {section.lessons.length !== 1 ? "s" : ""}
+                              {secDuration > 0 &&
+                                ` · ${formatDuration(secDuration)}`}
+                            </p>
+                          </div>
+                          <span className="text-slate-500 text-xs shrink-0">
+                            {isCollapsed ? "▶" : "▼"}
+                          </span>
+                        </button>
+
+                        {/* Lessons */}
+                        {!isCollapsed && (
+                          <div className="bg-slate-950">
+                            {section.lessons.length === 0 ? (
+                              <p className="text-xs text-slate-600 italic px-10 py-3">
+                                No lessons
+                              </p>
+                            ) : (
+                              section.lessons.map((lesson, lIdx) => {
+                                const isActive =
+                                  activeLesson?.title === lesson.title &&
+                                  activeLesson?.youtubeVideoId ===
+                                    lesson.youtubeVideoId;
+                                const hasVideo = !!lesson.youtubeVideoId;
+
+                                return (
+                                  <button
+                                    key={lIdx}
+                                    type="button"
+                                    onClick={() =>
+                                      hasVideo &&
+                                      goTo({ lesson, sectionIdx: sIdx })
+                                    }
+                                    className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors border-t border-slate-800/60 ${
+                                      isActive
+                                        ? "bg-sky-900/30 border-l-4 border-l-sky-500"
+                                        : hasVideo
+                                          ? "hover:bg-slate-800/50 active:bg-slate-800"
+                                          : "opacity-40 cursor-not-allowed"
+                                    }`}
+                                  >
+                                    {/* Thumbnail */}
+                                    {lesson.youtubeVideoId ? (
+                                      <div
+                                        className={`w-16 h-10 rounded-lg overflow-hidden shrink-0 ${isActive ? "ring-2 ring-sky-500" : "opacity-80"}`}
+                                      >
+                                        <YTThumb
+                                          videoId={lesson.youtubeVideoId}
+                                          className="w-full h-full object-cover"
+                                        />
+                                      </div>
+                                    ) : (
+                                      <div className="w-16 h-10 rounded-lg bg-slate-800 flex items-center justify-center shrink-0">
+                                        <span className="text-slate-600 text-xs">
+                                          ▶
+                                        </span>
+                                      </div>
+                                    )}
+
+                                    {/* Lesson info */}
+                                    <div className="flex-1 min-w-0">
+                                      <p
+                                        className={`text-xs font-semibold leading-snug truncate ${isActive ? "text-sky-300" : "text-slate-300"}`}
+                                      >
+                                        {lesson.title || `Lesson ${lIdx + 1}`}
+                                      </p>
+                                      <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                                        {lesson.durationSeconds > 0 && (
+                                          <span className="text-xs text-slate-500">
+                                            {formatDuration(
+                                              lesson.durationSeconds,
+                                            )}
+                                          </span>
+                                        )}
+                                        {lesson.isFree && (
+                                          <span className="text-xs font-bold text-emerald-500">
+                                            Free
+                                          </span>
+                                        )}
+                                        {!hasVideo && (
+                                          <span className="text-xs text-slate-600 italic">
+                                            No video
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {/* Active indicator */}
+                                    {isActive && (
+                                      <span className="text-sky-400 text-xs shrink-0 font-bold">
+                                        ▶
+                                      </span>
+                                    )}
+                                  </button>
+                                );
+                              })
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* ── Curriculum sidebar ───────────────────────────────────────────── */}
-        {sidebarOpen && (
-          <div className="w-80 shrink-0 bg-slate-900 border-l border-slate-800 flex flex-col overflow-hidden">
-            {/* Sidebar header */}
-            <div className="px-4 py-4 border-b border-slate-800 shrink-0">
-              <h3 className="font-black text-white text-sm">
-                Course Curriculum
-              </h3>
-              <p className="text-slate-400 text-xs mt-0.5">
-                {totalLessons} lesson{totalLessons !== 1 ? "s" : ""} ·{" "}
-                {formatDuration(totalDuration)}
-              </p>
-            </div>
+        {/* ── Desktop sidebar curriculum ────────────────────────────────────── */}
+        {/*
+          Hidden on mobile (md:flex handles show/hide).
+          The curriculum is always visible as a sidebar on md+ when curriculumOpen is true.
+        */}
+        <div
+          className={`
+            hidden md:flex flex-col
+            w-80 shrink-0 bg-slate-900 border-l border-slate-800
+            transition-all duration-300 overflow-hidden
+            ${curriculumOpen ? "md:w-80" : "md:w-0 md:border-0"}
+          `}
+        >
+          {curriculumOpen && <CurriculumPanel />}
+        </div>
 
-            {/* Sections list */}
-            <div className="flex-1 overflow-y-auto">
-              {(course.sections ?? []).length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
-                  <span className="text-3xl mb-2 opacity-30">📋</span>
-                  <p className="text-slate-500 text-xs">No sections yet</p>
-                </div>
-              ) : (
-                (course.sections ?? []).map((section, sIdx) => {
-                  const isCollapsed = collapsedSections.has(sIdx);
-                  const secDuration = section.lessons.reduce(
-                    (s, l) => s + (l.durationSeconds || 0),
-                    0,
-                  );
-                  const isActiveSection = sIdx === activeSectionIdx;
-
-                  return (
-                    <div key={sIdx} className="border-b border-slate-800">
-                      {/* Section header */}
-                      <button
-                        type="button"
-                        onClick={() => toggleSection(sIdx)}
-                        className={`w-full flex items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-slate-800/50 ${isActiveSection ? "bg-slate-800/30" : ""}`}
-                      >
-                        <span
-                          className={`text-xs font-black shrink-0 w-5 h-5 rounded-full flex items-center justify-center transition-colors ${isActiveSection ? "bg-sky-600 text-white" : "bg-slate-700 text-slate-400"}`}
-                        >
-                          {sIdx + 1}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <p
-                            className={`text-xs font-bold truncate ${isActiveSection ? "text-sky-400" : "text-slate-200"}`}
-                          >
-                            {section.title || `Section ${sIdx + 1}`}
-                          </p>
-                          <p className="text-xs text-slate-500 mt-0.5">
-                            {section.lessons.length} lesson
-                            {section.lessons.length !== 1 ? "s" : ""}
-                            {secDuration > 0 &&
-                              ` · ${formatDuration(secDuration)}`}
-                          </p>
-                        </div>
-                        <span className="text-slate-500 text-xs shrink-0">
-                          {isCollapsed ? "▶" : "▼"}
-                        </span>
-                      </button>
-
-                      {/* Lessons list */}
-                      {!isCollapsed && (
-                        <div className="bg-slate-950/40">
-                          {section.lessons.length === 0 ? (
-                            <p className="text-xs text-slate-600 italic px-10 py-3">
-                              No lessons
-                            </p>
-                          ) : (
-                            section.lessons.map((lesson, lIdx) => {
-                              const isActive =
-                                activeLesson?.title === lesson.title &&
-                                activeLesson?.youtubeVideoId ===
-                                  lesson.youtubeVideoId;
-                              const hasVideo = !!lesson.youtubeVideoId;
-
-                              return (
-                                <button
-                                  key={lIdx}
-                                  type="button"
-                                  onClick={() =>
-                                    hasVideo &&
-                                    goTo({ lesson, sectionIdx: sIdx })
-                                  }
-                                  className={`w-full flex items-start gap-3 px-4 py-3 text-left transition-colors border-t border-slate-800/50 ${
-                                    isActive
-                                      ? "bg-sky-900/30 border-l-2 border-l-sky-500"
-                                      : hasVideo
-                                        ? "hover:bg-slate-800/40 cursor-pointer"
-                                        : "opacity-40 cursor-not-allowed"
-                                  }`}
-                                >
-                                  {/* Play icon / index */}
-                                  <div
-                                    className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 mt-0.5 transition-colors ${
-                                      isActive
-                                        ? "bg-sky-600 text-white"
-                                        : hasVideo
-                                          ? "bg-slate-700 text-slate-300"
-                                          : "bg-slate-800 text-slate-600"
-                                    }`}
-                                  >
-                                    {isActive ? (
-                                      <span className="text-xs">▶</span>
-                                    ) : (
-                                      <span className="text-xs font-bold">
-                                        {lIdx + 1}
-                                      </span>
-                                    )}
-                                  </div>
-
-                                  {/* Lesson details */}
-                                  <div className="flex-1 min-w-0">
-                                    <p
-                                      className={`text-xs font-semibold leading-snug ${isActive ? "text-sky-300" : "text-slate-300"}`}
-                                    >
-                                      {lesson.title || `Lesson ${lIdx + 1}`}
-                                    </p>
-                                    <div className="flex items-center gap-2 mt-1 flex-wrap">
-                                      {lesson.durationSeconds > 0 && (
-                                        <span className="text-xs text-slate-500">
-                                          {formatDuration(
-                                            lesson.durationSeconds,
-                                          )}
-                                        </span>
-                                      )}
-                                      {lesson.isFree && (
-                                        <span className="text-xs font-bold text-emerald-500">
-                                          Free
-                                        </span>
-                                      )}
-                                      {!hasVideo && (
-                                        <span className="text-xs text-slate-600 italic">
-                                          No video
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-
-                                  {/* YT mini thumb */}
-                                  {lesson.youtubeVideoId && !isActive && (
-                                    <div className="w-12 h-8 rounded-lg overflow-hidden shrink-0 opacity-60 group-hover:opacity-100">
-                                      <YTThumb
-                                        videoId={lesson.youtubeVideoId}
-                                        className="w-full h-full object-cover"
-                                      />
-                                    </div>
-                                  )}
-                                </button>
-                              );
-                            })
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })
-              )}
-            </div>
+        {/* ── Mobile curriculum overlay (full-screen bottom drawer) ───────── */}
+        {curriculumOpen && (
+          <div className="md:hidden fixed inset-0 z-10 flex flex-col bg-slate-900">
+            <CurriculumPanel />
           </div>
         )}
       </div>
@@ -2010,7 +2179,6 @@ function CourseCard({
             🎬
           </div>
         )}
-        {/* Status badge */}
         <div className="absolute top-2 right-2">
           <span
             className={`text-xs font-bold px-2.5 py-1 rounded-full ${sc.cls}`}
@@ -2018,7 +2186,6 @@ function CourseCard({
             {sc.label}
           </span>
         </div>
-        {/* Duration overlay */}
         {course.totalDurationSeconds > 0 && (
           <div className="absolute bottom-2 right-2 bg-black/70 text-white text-xs font-bold px-2 py-0.5 rounded-lg">
             {formatDuration(course.totalDurationSeconds)}
@@ -2039,7 +2206,6 @@ function CourseCard({
           )}
         </div>
 
-        {/* Tags */}
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="text-xs font-bold text-sky-700 bg-sky-50 border border-sky-100 px-2 py-0.5 rounded-full">
             {course.subject}
@@ -2056,7 +2222,6 @@ function CourseCard({
           </span>
         </div>
 
-        {/* Curriculum stats */}
         <div className="flex items-center gap-3 text-xs text-slate-500">
           <span>
             📚{" "}
@@ -2077,7 +2242,6 @@ function CourseCard({
           )}
         </div>
 
-        {/* Rating */}
         {course.ratingsCount > 0 && (
           <div className="flex items-center gap-1.5 text-xs">
             <span className="text-amber-500">★</span>
@@ -2138,7 +2302,6 @@ export default function InstructorVideoCoursePage() {
   const [pagination, setPagination] = useState<Pagination | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Filters
   const [search, setSearch] = useState("");
   const [filterSubject, setFilterSubject] = useState("");
   const [filterClass, setFilterClass] = useState("");
@@ -2148,7 +2311,6 @@ export default function InstructorVideoCoursePage() {
   const [page, setPage] = useState(1);
   const [debouncedSearch, setDebouncedSearch] = useState("");
 
-  // Modals
   const [showModal, setShowModal] = useState(false);
   const [editCourse, setEditCourse] = useState<Course | undefined>(undefined);
   const [deleteCourse, setDeleteCourse] = useState<Course | undefined>(
@@ -2226,9 +2388,7 @@ export default function InstructorVideoCoursePage() {
     }
   };
 
-  // Load full course (with sections) for the player
   const handleWatchClick = async (course: Course) => {
-    // If sections are already loaded, use directly
     if (course.sections) {
       setWatchCourse(course);
       return;
