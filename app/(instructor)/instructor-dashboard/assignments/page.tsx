@@ -24,6 +24,26 @@ interface Assignment {
   updatedAt: string;
 }
 
+interface Submission {
+  _id: string;
+  assignment: string;
+  student: {
+    _id: string;
+    name: string;
+    email: string;
+    avatar?: string;
+  };
+  submittedAt: string;
+  fileUrl: string | null;
+  fileName: string | null;
+  fileSize: number | null;
+  note: string;
+  status: "submitted" | "graded" | "returned";
+  score: number | null;
+  feedback: string | null;
+  isLate: boolean;
+}
+
 interface Pagination {
   total: number;
   page: number;
@@ -33,6 +53,7 @@ interface Pagination {
   hasPrevPage: boolean;
 }
 
+// ─── Constants ────────────────────────────────────────────────────────────────
 const SUBJECTS = [
   "Mathematics",
   "English Language",
@@ -52,9 +73,7 @@ const SUBJECTS = [
   "Visual Arts",
   "Business Management",
 ];
-
 const CLASS_LEVELS = ["All", "SHS 1", "SHS 2", "SHS 3"];
-
 const STATUS_OPTIONS = [
   { value: "published", label: "Published" },
   { value: "draft", label: "Draft" },
@@ -67,7 +86,6 @@ function formatFileSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
-
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString("en-GH", {
     day: "numeric",
@@ -75,30 +93,41 @@ function formatDate(iso: string) {
     year: "numeric",
   });
 }
-
+function formatDateTime(iso: string) {
+  return new Date(iso).toLocaleDateString("en-GH", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 function formatDueDate(iso: string) {
   const date = new Date(iso);
   const now = new Date();
-  const diffMs = date.getTime() - now.getTime();
-  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
-
+  const diffDays = Math.ceil((date.getTime() - now.getTime()) / 86400000);
   const formatted = date.toLocaleDateString("en-GH", {
     day: "numeric",
     month: "short",
     year: "numeric",
   });
-
   if (diffDays < 0) return { label: formatted, badge: "overdue" };
   if (diffDays === 0) return { label: "Due today", badge: "today" };
   if (diffDays <= 3) return { label: `${diffDays}d left`, badge: "soon" };
   return { label: formatted, badge: "normal" };
 }
-
-// Local ISO string for datetime-local input (strips timezone)
 function toDatetimeLocal(iso: string) {
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function getInitials(name: string) {
+  return name
+    .split(" ")
+    .map((n) => n[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
 }
 
 // ─── Spinner ──────────────────────────────────────────────────────────────────
@@ -126,109 +155,6 @@ function Spinner({ sm }: { sm?: boolean }) {
   );
 }
 
-// ─── PDF Preview Modal ────────────────────────────────────────────────────────
-// Route: app/api/assignment/[id]/preview/route.ts
-// NO sandbox on iframe — sandbox blocks the browser's built-in PDF renderer.
-function PDFPreviewModal({
-  assignment,
-  onClose,
-}: {
-  assignment: Assignment;
-  onClose: () => void;
-}) {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-
-  const previewUrl = `/api/assignment/${assignment._id}/preview`;
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black/80 backdrop-blur-sm">
-      {/* Header */}
-      <div className="bg-linear-to-r from-violet-600 to-purple-700 px-4 py-3 flex items-center gap-3 shrink-0">
-        <div className="w-8 h-8 rounded-xl bg-white/20 flex items-center justify-center text-base shrink-0">
-          📋
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="font-bold text-white text-sm truncate">
-            {assignment.title}
-          </p>
-          <p className="text-purple-200 text-xs">
-            {assignment.subject} · {assignment.fileName} ·{" "}
-            {assignment.fileSize ? formatFileSize(assignment.fileSize) : ""}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <a
-            href={previewUrl}
-            download={assignment.fileName ?? "assignment.pdf"}
-            className="text-xs font-bold text-purple-200 hover:text-white bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-lg transition-colors"
-          >
-            ⬇ Download
-          </a>
-          <button
-            onClick={onClose}
-            className="w-8 h-8 rounded-xl bg-white/20 hover:bg-white/30 text-white flex items-center justify-center font-bold transition-colors"
-          >
-            ✕
-          </button>
-        </div>
-      </div>
-
-      {/* Viewer */}
-      <div className="flex-1 relative overflow-hidden bg-slate-900">
-        {loading && !error && (
-          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4">
-            <Spinner />
-            <p className="text-slate-400 text-sm">Loading PDF…</p>
-          </div>
-        )}
-        {error && (
-          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4">
-            <div className="text-4xl">⚠️</div>
-            <p className="text-slate-300 text-sm font-semibold">
-              Could not render PDF in browser
-            </p>
-            <a
-              href={previewUrl}
-              download={assignment.fileName ?? "assignment.pdf"}
-              className="mt-2 text-sm font-bold text-white bg-violet-600 hover:bg-violet-700 px-4 py-2 rounded-xl transition-colors"
-            >
-              ⬇ Download PDF
-            </a>
-          </div>
-        )}
-        {/* No sandbox — required for browser PDF plugin to work */}
-        <iframe
-          src={previewUrl}
-          className="w-full h-full border-0"
-          title={assignment.title}
-          onLoad={() => {
-            setLoading(false);
-            setError(false);
-          }}
-          onError={() => {
-            setLoading(false);
-            setError(true);
-          }}
-        />
-      </div>
-
-      <div className="bg-slate-900 border-t border-slate-800 px-4 py-2 flex items-center justify-between shrink-0">
-        <p className="text-xs text-slate-500">Direct browser PDF renderer</p>
-        <p className="text-xs text-slate-500">ESC or ✕ to close</p>
-      </div>
-    </div>
-  );
-}
-
 // ─── Empty State ──────────────────────────────────────────────────────────────
 function EmptyState({ filtered }: { filtered: boolean }) {
   return (
@@ -248,6 +174,691 @@ function EmptyState({ filtered }: { filtered: boolean }) {
   );
 }
 
+// ─── PDF Preview Modal ────────────────────────────────────────────────────────
+function PDFPreviewModal({
+  url,
+  title,
+  fileName,
+  fileSize,
+  onClose,
+}: {
+  url: string;
+  title: string;
+  fileName: string | null;
+  fileSize: number | null;
+  onClose: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-60 flex flex-col bg-black/90 backdrop-blur-sm">
+      <div className="bg-linear-to-r from-violet-600 to-purple-700 px-4 py-3 flex items-center gap-3 shrink-0">
+        <div className="w-8 h-8 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
+          📄
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-bold text-white text-sm truncate">{title}</p>
+          {fileName && (
+            <p className="text-purple-200 text-xs">
+              {fileName}
+              {fileSize ? ` · ${formatFileSize(fileSize)}` : ""}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <a
+            href={url}
+            download={fileName ?? "file"}
+            className="text-xs font-bold text-purple-200 hover:text-white bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-lg transition-colors"
+          >
+            ⬇ Download
+          </a>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 rounded-xl bg-white/20 hover:bg-white/30 text-white flex items-center justify-center font-bold transition-colors"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 relative overflow-hidden bg-slate-900">
+        {loading && !error && (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3">
+            <Spinner />
+            <p className="text-slate-400 text-sm">Loading…</p>
+          </div>
+        )}
+        {error && (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4">
+            <div className="text-4xl">⚠️</div>
+            <p className="text-slate-300 text-sm font-semibold">
+              Could not render file in browser
+            </p>
+            <a
+              href={url}
+              download={fileName ?? "file"}
+              className="text-sm font-bold text-white bg-violet-600 hover:bg-violet-700 px-4 py-2 rounded-xl transition-colors"
+            >
+              ⬇ Download
+            </a>
+          </div>
+        )}
+        <iframe
+          src={url}
+          className="w-full h-full border-0"
+          title={title}
+          onLoad={() => {
+            setLoading(false);
+            setError(false);
+          }}
+          onError={() => {
+            setLoading(false);
+            setError(true);
+          }}
+        />
+      </div>
+      <div className="bg-slate-900 border-t border-slate-800 px-4 py-2 flex items-center justify-end shrink-0">
+        <p className="text-xs text-slate-500">ESC or ✕ to close</p>
+      </div>
+    </div>
+  );
+}
+
+// ─── Grade Modal ──────────────────────────────────────────────────────────────
+function GradeModal({
+  submission,
+  totalMarks,
+  onClose,
+  onGraded,
+}: {
+  submission: Submission;
+  totalMarks: number;
+  onClose: () => void;
+  onGraded: (updated: Submission) => void;
+}) {
+  const [score, setScore] = useState(
+    submission.score !== null ? String(submission.score) : "",
+  );
+  const [feedback, setFeedback] = useState(submission.feedback ?? "");
+  const [action, setAction] = useState<"graded" | "returned">("graded");
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    const scoreNum = parseFloat(score);
+    if (
+      action === "graded" &&
+      (score === "" || isNaN(scoreNum) || scoreNum < 0 || scoreNum > totalMarks)
+    ) {
+      toast.error(`Score must be between 0 and ${totalMarks}`);
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/submission/${submission._id}/grade`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          score: action === "graded" ? scoreNum : null,
+          feedback: feedback.trim(),
+          status: action,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message);
+      toast.success(
+        action === "graded"
+          ? "Submission graded!"
+          : "Submission returned to student.",
+      );
+      onGraded(data.data);
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save grade.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const pct =
+    score !== "" && !isNaN(parseFloat(score))
+      ? Math.round((parseFloat(score) / totalMarks) * 100)
+      : null;
+
+  return (
+    <div className="fixed inset-0 z-70 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md flex flex-col overflow-hidden">
+        <div className="bg-linear-to-r from-violet-600 to-purple-700 px-5 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center text-lg">
+              🏆
+            </div>
+            <div>
+              <h2 className="font-black text-white text-base">
+                Grade Submission
+              </h2>
+              <p className="text-purple-200 text-xs">
+                {submission.student.name}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 rounded-xl bg-white/20 hover:bg-white/30 text-white flex items-center justify-center font-bold"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="p-5 flex flex-col gap-4">
+          {/* Action toggle */}
+          <div className="flex rounded-xl overflow-hidden border border-slate-200 bg-slate-50">
+            <button
+              onClick={() => setAction("graded")}
+              className={`flex-1 py-2.5 text-sm font-bold transition-all ${action === "graded" ? "bg-white text-violet-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+            >
+              ✅ Grade & Approve
+            </button>
+            <button
+              onClick={() => setAction("returned")}
+              className={`flex-1 py-2.5 text-sm font-bold transition-all ${action === "returned" ? "bg-white text-amber-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+            >
+              🔄 Return for Revision
+            </button>
+          </div>
+
+          {/* Score input */}
+          {action === "graded" && (
+            <div className="flex flex-col gap-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                Score{" "}
+                <span className="text-slate-400 normal-case font-normal">
+                  / {totalMarks}
+                </span>
+              </label>
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  min={0}
+                  max={totalMarks}
+                  value={score}
+                  onChange={(e) => setScore(e.target.value)}
+                  placeholder="0"
+                  className="flex-1 border border-slate-200 rounded-xl px-4 py-3 text-2xl font-black text-violet-700 text-center focus:outline-none focus:ring-2 focus:ring-violet-500"
+                />
+                <div className="text-center">
+                  <p className="text-xl font-black text-slate-400">
+                    / {totalMarks}
+                  </p>
+                  {pct !== null && (
+                    <p
+                      className={`text-xs font-bold mt-0.5 ${pct >= 80 ? "text-emerald-600" : pct >= 60 ? "text-amber-600" : "text-red-500"}`}
+                    >
+                      {pct}%
+                    </p>
+                  )}
+                </div>
+              </div>
+              {score !== "" && !isNaN(parseFloat(score)) && (
+                <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${pct! >= 80 ? "bg-emerald-500" : pct! >= 60 ? "bg-amber-500" : "bg-red-500"}`}
+                    style={{ width: `${Math.min(100, pct!)}%` }}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Feedback */}
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+              Feedback{" "}
+              <span className="text-slate-400 normal-case font-normal">
+                (optional)
+              </span>
+            </label>
+            <textarea
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              placeholder={
+                action === "returned"
+                  ? "Explain what needs to be revised…"
+                  : "Add comments for the student…"
+              }
+              rows={3}
+              className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500 resize-none"
+            />
+          </div>
+
+          {/* Actions */}
+          <div className="flex gap-3 pt-1">
+            <button
+              onClick={onClose}
+              disabled={saving}
+              className="flex-1 text-sm font-bold text-slate-700 border-2 border-slate-200 hover:bg-slate-50 py-3 rounded-xl transition-all disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className={`flex-1 flex items-center justify-center gap-2 text-sm font-bold text-white py-3 rounded-xl shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed ${action === "graded" ? "bg-linear-to-r from-violet-600 to-purple-700 hover:from-violet-700 hover:to-purple-800" : "bg-amber-500 hover:bg-amber-600"}`}
+            >
+              {saving ? (
+                <>
+                  <Spinner sm />
+                  {action === "graded" ? "Saving…" : "Returning…"}
+                </>
+              ) : action === "graded" ? (
+                "💾 Save Grade"
+              ) : (
+                "🔄 Return"
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Submissions Drawer ───────────────────────────────────────────────────────
+function SubmissionsDrawer({
+  assignment,
+  onClose,
+  onSubmissionsChange,
+}: {
+  assignment: Assignment;
+  onClose: () => void;
+  onSubmissionsChange: (count: number) => void;
+}) {
+  const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filterStatus, setFilterStatus] = useState("");
+  const [gradingSubmission, setGradingSubmission] = useState<Submission | null>(
+    null,
+  );
+  const [previewFile, setPreviewFile] = useState<{
+    url: string;
+    title: string;
+    fileName: string | null;
+    fileSize: number | null;
+  } | null>(null);
+
+  const fetchSubmissions = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        ...(filterStatus && { status: filterStatus }),
+      });
+      const res = await fetch(
+        `/api/assignment/${assignment._id}/submissions?${params}`,
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message);
+      setSubmissions(data.data);
+    } catch (err: any) {
+      toast.error(err.message || "Failed to load submissions.");
+    } finally {
+      setLoading(false);
+    }
+  }, [assignment._id, filterStatus]);
+
+  useEffect(() => {
+    fetchSubmissions();
+  }, [fetchSubmissions]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !gradingSubmission && !previewFile) onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose, gradingSubmission, previewFile]);
+
+  const handleGraded = (updated: Submission) => {
+    setSubmissions((prev) =>
+      prev.map((s) => (s._id === updated._id ? updated : s)),
+    );
+    setGradingSubmission(null);
+    onSubmissionsChange(submissions.length);
+  };
+
+  const statusConfig: Record<
+    string,
+    { label: string; dot: string; badge: string }
+  > = {
+    submitted: {
+      label: "Submitted",
+      dot: "bg-sky-400",
+      badge: "bg-sky-50 text-sky-700 border-sky-200",
+    },
+    graded: {
+      label: "Graded",
+      dot: "bg-emerald-400",
+      badge: "bg-emerald-50 text-emerald-700 border-emerald-200",
+    },
+    returned: {
+      label: "Returned",
+      dot: "bg-amber-400",
+      badge: "bg-amber-50 text-amber-700 border-amber-200",
+    },
+  };
+
+  const counts = {
+    all: submissions.length,
+    submitted: submissions.filter((s) => s.status === "submitted").length,
+    graded: submissions.filter((s) => s.status === "graded").length,
+    returned: submissions.filter((s) => s.status === "returned").length,
+  };
+
+  const filtered = filterStatus
+    ? submissions.filter((s) => s.status === filterStatus)
+    : submissions;
+
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-50 flex"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onClose();
+        }}
+      >
+        {/* Backdrop */}
+        <div
+          className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+          onClick={onClose}
+        />
+
+        {/* Drawer */}
+        <div className="relative ml-auto w-full max-w-2xl h-full bg-white shadow-2xl flex flex-col">
+          {/* Header */}
+          <div className="bg-linear-to-r from-violet-600 to-purple-700 px-5 py-4 flex items-start justify-between shrink-0">
+            <div className="flex-1 min-w-0 pr-3">
+              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                <span className="text-xs font-bold text-purple-200 bg-white/15 px-2 py-0.5 rounded-full">
+                  {assignment.subject}
+                </span>
+                <span className="text-xs font-bold text-purple-200 bg-white/15 px-2 py-0.5 rounded-full">
+                  {assignment.classLevel}
+                </span>
+              </div>
+              <h2 className="font-black text-white text-base leading-snug">
+                {assignment.title}
+              </h2>
+              <p className="text-purple-200 text-xs mt-1">
+                {loading
+                  ? "Loading…"
+                  : `${counts.all} submission${counts.all !== 1 ? "s" : ""} · ${counts.graded} graded`}
+              </p>
+            </div>
+            <button
+              onClick={onClose}
+              className="w-8 h-8 rounded-xl bg-white/20 hover:bg-white/30 text-white flex items-center justify-center font-bold shrink-0"
+            >
+              ✕
+            </button>
+          </div>
+
+          {/* Stats bar */}
+          {!loading && counts.all > 0 && (
+            <div className="grid grid-cols-3 border-b border-slate-100 bg-slate-50 shrink-0">
+              {[
+                {
+                  key: "submitted",
+                  label: "Pending",
+                  icon: "⏳",
+                  color: "text-sky-600",
+                },
+                {
+                  key: "graded",
+                  label: "Graded",
+                  icon: "✅",
+                  color: "text-emerald-600",
+                },
+                {
+                  key: "returned",
+                  label: "Returned",
+                  icon: "🔄",
+                  color: "text-amber-600",
+                },
+              ].map(({ key, label, icon, color }) => (
+                <button
+                  key={key}
+                  onClick={() =>
+                    setFilterStatus(filterStatus === key ? "" : key)
+                  }
+                  className={`flex flex-col items-center py-3 text-center transition-all border-b-2 ${filterStatus === key ? "border-violet-500 bg-white" : "border-transparent hover:bg-white/70"}`}
+                >
+                  <span className={`text-xl font-black ${color}`}>
+                    {counts[key as keyof typeof counts]}
+                  </span>
+                  <span className="text-xs text-slate-500 font-semibold mt-0.5">
+                    {icon} {label}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Body */}
+          <div className="flex-1 overflow-y-auto">
+            {loading ? (
+              <div className="flex items-center justify-center py-20">
+                <div className="flex flex-col items-center gap-3">
+                  <Spinner />
+                  <p className="text-slate-500 text-sm">Loading submissions…</p>
+                </div>
+              </div>
+            ) : filtered.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20 text-center px-6">
+                <div className="text-5xl mb-4">
+                  {counts.all === 0 ? "📭" : "🔍"}
+                </div>
+                <h3 className="font-black text-slate-700 text-base mb-1">
+                  {counts.all === 0
+                    ? "No submissions yet"
+                    : "No submissions match this filter"}
+                </h3>
+                <p className="text-slate-400 text-sm">
+                  {counts.all === 0
+                    ? "Students haven't submitted anything for this assignment yet."
+                    : "Try a different filter."}
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {filtered.map((sub) => {
+                  const sc = statusConfig[sub.status];
+                  const pct =
+                    sub.score !== null
+                      ? Math.round((sub.score / assignment.totalMarks) * 100)
+                      : null;
+                  return (
+                    <div
+                      key={sub._id}
+                      className="px-5 py-4 hover:bg-slate-50/70 transition-colors"
+                    >
+                      <div className="flex items-start gap-3">
+                        {/* Avatar */}
+                        <div className="w-9 h-9 rounded-xl bg-linear-to-br from-violet-500 to-purple-600 flex items-center justify-center text-white text-xs font-black shrink-0">
+                          {getInitials(sub.student.name)}
+                        </div>
+
+                        <div className="flex-1 min-w-0">
+                          {/* Name + status */}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-bold text-slate-800 text-sm">
+                              {sub.student.name}
+                            </p>
+                            <span
+                              className={`text-xs font-bold px-2 py-0.5 rounded-full border ${sc.badge}`}
+                            >
+                              <span
+                                className={`inline-block w-1.5 h-1.5 rounded-full ${sc.dot} mr-1`}
+                              />
+                              {sc.label}
+                            </span>
+                            {sub.isLate && (
+                              <span className="text-xs font-bold text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full">
+                                Late
+                              </span>
+                            )}
+                          </div>
+
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            {sub.student.email} ·{" "}
+                            {formatDateTime(sub.submittedAt)}
+                          </p>
+
+                          {/* Score bar */}
+                          {sub.status === "graded" && sub.score !== null && (
+                            <div className="mt-2 flex items-center gap-2">
+                              <div className="flex-1 bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full ${pct! >= 80 ? "bg-emerald-500" : pct! >= 60 ? "bg-amber-500" : "bg-red-500"}`}
+                                  style={{ width: `${Math.min(100, pct!)}%` }}
+                                />
+                              </div>
+                              <span
+                                className={`text-xs font-black ${pct! >= 80 ? "text-emerald-600" : pct! >= 60 ? "text-amber-600" : "text-red-500"}`}
+                              >
+                                {sub.score}/{assignment.totalMarks}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Note preview */}
+                          {sub.note && (
+                            <p className="text-xs text-slate-500 mt-1.5 line-clamp-2 italic">
+                              "{sub.note}"
+                            </p>
+                          )}
+
+                          {/* Feedback preview */}
+                          {sub.feedback && (
+                            <div className="mt-2 bg-violet-50 border border-violet-100 rounded-xl px-3 py-2">
+                              <p className="text-xs text-violet-700 line-clamp-2">
+                                {sub.feedback}
+                              </p>
+                            </div>
+                          )}
+
+                          {/* Actions row */}
+                          <div className="flex items-center gap-2 mt-3 flex-wrap">
+                            {/* View submitted file */}
+                            {sub.fileName && sub.fileUrl && (
+                              <button
+                                onClick={() =>
+                                  setPreviewFile({
+                                    url: sub.fileUrl!,
+                                    title: `${sub.student.name}'s submission`,
+                                    fileName: sub.fileName,
+                                    fileSize: sub.fileSize,
+                                  })
+                                }
+                                className="flex items-center gap-1.5 text-xs font-bold text-violet-700 bg-violet-50 hover:bg-violet-100 border border-violet-200 px-3 py-1.5 rounded-xl transition-colors"
+                              >
+                                👁 View File
+                                <span className="text-violet-400 font-normal">
+                                  (
+                                  {sub.fileName.split(".").pop()?.toUpperCase()}
+                                  )
+                                </span>
+                              </button>
+                            )}
+
+                            {/* Grade button */}
+                            <button
+                              onClick={() => setGradingSubmission(sub)}
+                              className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl transition-colors border ${
+                                sub.status === "graded"
+                                  ? "text-slate-600 bg-slate-50 hover:bg-slate-100 border-slate-200"
+                                  : "text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border-emerald-200"
+                              }`}
+                            >
+                              {sub.status === "graded"
+                                ? "✏️ Edit Grade"
+                                : "🏆 Grade"}
+                            </button>
+
+                            {/* Return button (quick shortcut) */}
+                            {sub.status === "submitted" && (
+                              <button
+                                onClick={() => {
+                                  setGradingSubmission({ ...sub });
+                                }}
+                                className="flex items-center gap-1.5 text-xs font-bold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-3 py-1.5 rounded-xl transition-colors"
+                              >
+                                🔄 Return
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Footer */}
+          <div className="border-t border-slate-100 px-5 py-3 flex items-center justify-between bg-white shrink-0">
+            <p className="text-xs text-slate-400">
+              {filtered.length} of {counts.all} submission
+              {counts.all !== 1 ? "s" : ""}
+            </p>
+            <button
+              onClick={onClose}
+              className="text-xs font-bold text-slate-600 border border-slate-200 hover:bg-slate-50 px-4 py-2 rounded-xl transition-colors"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Grade modal */}
+      {gradingSubmission && (
+        <GradeModal
+          submission={gradingSubmission}
+          totalMarks={assignment.totalMarks}
+          onClose={() => setGradingSubmission(null)}
+          onGraded={handleGraded}
+        />
+      )}
+
+      {/* File preview */}
+      {previewFile && (
+        <PDFPreviewModal
+          url={previewFile.url}
+          title={previewFile.title}
+          fileName={previewFile.fileName}
+          fileSize={previewFile.fileSize}
+          onClose={() => setPreviewFile(null)}
+        />
+      )}
+    </>
+  );
+}
+
 // ─── Assignment Modal (Create / Edit) ─────────────────────────────────────────
 function AssignmentModal({
   mode,
@@ -264,10 +875,8 @@ function AssignmentModal({
   const [saving, setSaving] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [removeFile, setRemoveFile] = useState(false);
-
   const isEdit = mode === "edit";
 
-  // Form state
   const [title, setTitle] = useState(assignment?.title ?? "");
   const [subject, setSubject] = useState(assignment?.subject ?? "");
   const [topic, setTopic] = useState(assignment?.topic ?? "");
@@ -302,13 +911,6 @@ function AssignmentModal({
     setRemoveFile(false);
   };
 
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    const file = e.dataTransfer.files[0];
-    if (file) handleFile(file);
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !subject) {
@@ -319,7 +921,6 @@ function AssignmentModal({
       toast.error("Due date is required.");
       return;
     }
-
     setSaving(true);
     try {
       const fd = new FormData();
@@ -338,11 +939,12 @@ function AssignmentModal({
       const url = isEdit
         ? `/api/assignment/${assignment!._id}`
         : "/api/assignment";
-      const method = isEdit ? "PATCH" : "POST";
-      const res = await fetch(url, { method, body: fd });
+      const res = await fetch(url, {
+        method: isEdit ? "PATCH" : "POST",
+        body: fd,
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message);
-
       toast.success(
         isEdit ? "Assignment updated!" : "Assignment created successfully!",
       );
@@ -354,13 +956,11 @@ function AssignmentModal({
     }
   };
 
-  const currentFileName = assignment?.fileName;
-  const hasExistingFile = isEdit && currentFileName && !removeFile;
+  const hasExistingFile = isEdit && assignment?.fileName && !removeFile;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
       <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-        {/* Header */}
         <div className="bg-linear-to-r from-violet-600 to-purple-700 px-6 py-5 flex items-center justify-between rounded-t-3xl sticky top-0 z-10">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center text-lg">
@@ -377,14 +977,13 @@ function AssignmentModal({
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-xl bg-white/20 hover:bg-white/30 text-white flex items-center justify-center transition-colors text-sm font-bold"
+            className="w-8 h-8 rounded-xl bg-white/20 hover:bg-white/30 text-white flex items-center justify-center font-bold"
           >
             ✕
           </button>
         </div>
 
         <form onSubmit={handleSubmit} className="px-6 py-6 flex flex-col gap-4">
-          {/* Title */}
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
               Title <span className="text-red-400">*</span>
@@ -395,11 +994,10 @@ function AssignmentModal({
               placeholder="e.g. End of Term Mathematics Assignment"
               required
               disabled={saving}
-              className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all disabled:opacity-60"
+              className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500 disabled:opacity-60"
             />
           </div>
 
-          {/* Subject + Class Level */}
           <div className="grid grid-cols-2 gap-3">
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
@@ -410,7 +1008,7 @@ function AssignmentModal({
                 onChange={(e) => setSubject(e.target.value)}
                 required
                 disabled={saving}
-                className="w-full border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all bg-white disabled:opacity-60"
+                className="w-full border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white disabled:opacity-60"
               >
                 <option value="">Select subject</option>
                 {SUBJECTS.map((s) => (
@@ -428,7 +1026,7 @@ function AssignmentModal({
                 value={classLevel}
                 onChange={(e) => setClassLevel(e.target.value)}
                 disabled={saving}
-                className="w-full border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all bg-white disabled:opacity-60"
+                className="w-full border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white disabled:opacity-60"
               >
                 {CLASS_LEVELS.map((c) => (
                   <option key={c} value={c}>
@@ -439,7 +1037,6 @@ function AssignmentModal({
             </div>
           </div>
 
-          {/* Topic */}
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
               Topic / Chapter
@@ -449,11 +1046,10 @@ function AssignmentModal({
               onChange={(e) => setTopic(e.target.value)}
               placeholder="e.g. Algebra – Quadratic Equations"
               disabled={saving}
-              className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all disabled:opacity-60"
+              className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500 disabled:opacity-60"
             />
           </div>
 
-          {/* Due Date + Total Marks */}
           <div className="grid grid-cols-2 gap-3">
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
@@ -465,7 +1061,7 @@ function AssignmentModal({
                 onChange={(e) => setDueDate(e.target.value)}
                 required
                 disabled={saving}
-                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all disabled:opacity-60"
+                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 disabled:opacity-60"
               />
             </div>
             <div className="flex flex-col gap-1.5">
@@ -479,12 +1075,11 @@ function AssignmentModal({
                 value={totalMarks}
                 onChange={(e) => setTotalMarks(e.target.value)}
                 disabled={saving}
-                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all disabled:opacity-60"
+                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 disabled:opacity-60"
               />
             </div>
           </div>
 
-          {/* Status + Allow Late */}
           <div className="grid grid-cols-2 gap-3">
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
@@ -492,11 +1087,9 @@ function AssignmentModal({
               </label>
               <select
                 value={status}
-                onChange={(e) =>
-                  setStatus(e.target.value as "draft" | "published" | "closed")
-                }
+                onChange={(e) => setStatus(e.target.value as any)}
                 disabled={saving}
-                className="w-full border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all bg-white disabled:opacity-60"
+                className="w-full border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white disabled:opacity-60"
               >
                 {STATUS_OPTIONS.map((s) => (
                   <option key={s.value} value={s.value}>
@@ -513,11 +1106,7 @@ function AssignmentModal({
                 type="button"
                 onClick={() => setAllowLate((p) => !p)}
                 disabled={saving}
-                className={`w-full flex items-center justify-between px-4 py-3 rounded-xl border text-sm font-semibold transition-all disabled:opacity-60 ${
-                  allowLate
-                    ? "border-violet-300 bg-violet-50 text-violet-700"
-                    : "border-slate-200 bg-white text-slate-600"
-                }`}
+                className={`w-full flex items-center justify-between px-4 py-3 rounded-xl border text-sm font-semibold transition-all disabled:opacity-60 ${allowLate ? "border-violet-300 bg-violet-50 text-violet-700" : "border-slate-200 bg-white text-slate-600"}`}
               >
                 <span>{allowLate ? "Allowed" : "Not allowed"}</span>
                 <div
@@ -531,7 +1120,6 @@ function AssignmentModal({
             </div>
           </div>
 
-          {/* Instructions */}
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
               Instructions
@@ -542,11 +1130,10 @@ function AssignmentModal({
               placeholder="Describe what students need to do, submission requirements, marking criteria…"
               rows={4}
               disabled={saving}
-              className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all disabled:opacity-60 resize-none"
+              className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500 disabled:opacity-60 resize-none"
             />
           </div>
 
-          {/* File Attachment */}
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
               PDF Attachment{" "}
@@ -554,15 +1141,13 @@ function AssignmentModal({
                 (optional)
               </span>
             </label>
-
-            {/* Show existing file chip in edit mode */}
             {hasExistingFile && (
               <div className="flex items-center gap-2 bg-violet-50 border border-violet-100 rounded-xl px-3 py-2">
                 <span className="text-xs font-bold text-violet-600 bg-violet-100 px-2 py-0.5 rounded-lg">
                   PDF
                 </span>
                 <span className="text-xs text-violet-700 truncate flex-1 font-medium">
-                  {currentFileName}
+                  {assignment?.fileName}
                 </span>
                 <button
                   type="button"
@@ -573,8 +1158,6 @@ function AssignmentModal({
                 </button>
               </div>
             )}
-
-            {/* Drop zone — shown when no existing file, or when replacing */}
             {(!hasExistingFile || selectedFile) && (
               <div
                 onDragOver={(e) => {
@@ -582,15 +1165,14 @@ function AssignmentModal({
                   setDragOver(true);
                 }}
                 onDragLeave={() => setDragOver(false)}
-                onDrop={handleDrop}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOver(false);
+                  const f = e.dataTransfer.files[0];
+                  if (f) handleFile(f);
+                }}
                 onClick={() => fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-2xl px-4 py-6 flex flex-col items-center gap-2 cursor-pointer transition-all ${
-                  dragOver
-                    ? "border-violet-400 bg-violet-50"
-                    : selectedFile
-                      ? "border-green-300 bg-green-50"
-                      : "border-slate-200 hover:border-violet-300 hover:bg-violet-50/40"
-                }`}
+                className={`border-2 border-dashed rounded-2xl px-4 py-6 flex flex-col items-center gap-2 cursor-pointer transition-all ${dragOver ? "border-violet-400 bg-violet-50" : selectedFile ? "border-green-300 bg-green-50" : "border-slate-200 hover:border-violet-300 hover:bg-violet-50/40"}`}
               >
                 <input
                   ref={fileInputRef}
@@ -607,7 +1189,7 @@ function AssignmentModal({
                 </span>
                 {selectedFile ? (
                   <>
-                    <p className="text-sm font-bold text-green-700 text-center truncate max-w-xs">
+                    <p className="text-sm font-bold text-green-700 truncate max-w-xs">
                       {selectedFile.name}
                     </p>
                     <p className="text-xs text-green-600">
@@ -618,11 +1200,10 @@ function AssignmentModal({
                       onClick={(e) => {
                         e.stopPropagation();
                         setSelectedFile(null);
-                        if (removeFile) setRemoveFile(false);
                         if (fileInputRef.current)
                           fileInputRef.current.value = "";
                       }}
-                      className="text-xs text-red-500 hover:underline mt-1"
+                      className="text-xs text-red-500 hover:underline"
                     >
                       Remove file
                     </button>
@@ -640,8 +1221,6 @@ function AssignmentModal({
                 )}
               </div>
             )}
-
-            {/* Replace button when existing file is present and no new file selected */}
             {hasExistingFile && !selectedFile && (
               <button
                 type="button"
@@ -651,19 +1230,8 @@ function AssignmentModal({
                 Replace with a different PDF
               </button>
             )}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/pdf"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) handleFile(f);
-              }}
-            />
           </div>
 
-          {/* Actions */}
           <div className="flex gap-3 pt-1">
             <button
               type="button"
@@ -676,7 +1244,7 @@ function AssignmentModal({
             <button
               type="submit"
               disabled={saving}
-              className="flex-1 flex items-center justify-center gap-2 text-sm font-bold text-white bg-linear-to-r from-violet-600 to-purple-700 hover:from-violet-700 hover:to-purple-800 disabled:opacity-50 disabled:cursor-not-allowed py-3 rounded-xl shadow-md transition-all"
+              className="flex-1 flex items-center justify-center gap-2 text-sm font-bold text-white bg-linear-to-r from-violet-600 to-purple-700 hover:from-violet-700 hover:to-purple-800 disabled:opacity-50 py-3 rounded-xl shadow-md transition-all"
             >
               {saving ? (
                 <>
@@ -707,7 +1275,6 @@ function DeleteConfirm({
   onDeleted: (id: string) => void;
 }) {
   const [deleting, setDeleting] = useState(false);
-
   const handleDelete = async () => {
     setDeleting(true);
     try {
@@ -757,14 +1324,14 @@ function DeleteConfirm({
           <button
             onClick={onClose}
             disabled={deleting}
-            className="flex-1 text-sm font-bold text-slate-700 border-2 border-slate-200 hover:bg-slate-50 py-3 rounded-xl transition-all disabled:opacity-50"
+            className="flex-1 text-sm font-bold text-slate-700 border-2 border-slate-200 hover:bg-slate-50 py-3 rounded-xl disabled:opacity-50"
           >
             Cancel
           </button>
           <button
             onClick={handleDelete}
             disabled={deleting}
-            className="flex-1 flex items-center justify-center gap-2 text-sm font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed py-3 rounded-xl transition-all"
+            className="flex-1 flex items-center justify-center gap-2 text-sm font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 py-3 rounded-xl"
           >
             {deleting ? (
               <>
@@ -787,11 +1354,13 @@ function AssignmentCard({
   onPreview,
   onEdit,
   onDelete,
+  onViewSubmissions,
 }: {
   assignment: Assignment;
   onPreview: (a: Assignment) => void;
   onEdit: (a: Assignment) => void;
   onDelete: (a: Assignment) => void;
+  onViewSubmissions: (a: Assignment) => void;
 }) {
   const levelColors: Record<string, string> = {
     "SHS 1": "bg-blue-100 text-blue-700",
@@ -799,16 +1368,11 @@ function AssignmentCard({
     "SHS 3": "bg-violet-100 text-violet-700",
     All: "bg-green-100 text-green-700",
   };
-
   const statusConfig: Record<string, { label: string; className: string }> = {
-    published: {
-      label: "Published",
-      className: "bg-green-100 text-green-700",
-    },
+    published: { label: "Published", className: "bg-green-100 text-green-700" },
     draft: { label: "Draft", className: "bg-amber-100 text-amber-700" },
     closed: { label: "Closed", className: "bg-slate-100 text-slate-600" },
   };
-
   const due = formatDueDate(assignment.dueDate);
   const dueBadgeClass: Record<string, string> = {
     overdue: "bg-red-100 text-red-700",
@@ -816,16 +1380,12 @@ function AssignmentCard({
     soon: "bg-amber-100 text-amber-700",
     normal: "bg-slate-100 text-slate-600",
   };
-
   const sc = statusConfig[assignment.status] ?? statusConfig.published;
 
   return (
     <div className="bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all overflow-hidden">
-      {/* Top accent bar */}
       <div className="h-1 bg-linear-to-r from-violet-500 to-purple-500" />
-
       <div className="p-4 flex flex-col gap-3">
-        {/* Title row */}
         <div className="flex items-start gap-3">
           <div className="w-10 h-10 rounded-xl bg-violet-50 border border-violet-100 flex items-center justify-center text-lg shrink-0">
             📋
@@ -842,7 +1402,6 @@ function AssignmentCard({
           </div>
         </div>
 
-        {/* Tags row */}
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-bold text-violet-700 bg-violet-50 border border-violet-100 px-2.5 py-1 rounded-full">
             {assignment.subject}
@@ -859,14 +1418,12 @@ function AssignmentCard({
           </span>
         </div>
 
-        {/* Instructions preview */}
         {assignment.instructions && (
           <p className="text-xs text-slate-500 line-clamp-2 leading-relaxed">
             {assignment.instructions}
           </p>
         )}
 
-        {/* Due date + marks row */}
         <div className="flex items-center gap-2 flex-wrap">
           <span
             className={`text-xs font-bold px-2.5 py-1 rounded-full ${dueBadgeClass[due.badge]}`}
@@ -878,12 +1435,11 @@ function AssignmentCard({
           </span>
           {assignment.allowLateSubmission && (
             <span className="text-xs font-semibold text-slate-500 bg-slate-50 px-2.5 py-1 rounded-full">
-              Late allowed
+              Late OK
             </span>
           )}
         </div>
 
-        {/* Attached file row (if any) */}
         {assignment.fileName && (
           <div className="flex items-center gap-3 bg-slate-50 rounded-xl px-3 py-2">
             <span className="text-xs font-bold text-violet-600 uppercase bg-violet-50 px-2 py-0.5 rounded-lg border border-violet-100">
@@ -900,18 +1456,30 @@ function AssignmentCard({
           </div>
         )}
 
-        {/* Stats + date */}
+        {/* Submissions CTA */}
+        <button
+          onClick={() => onViewSubmissions(assignment)}
+          className="w-full flex items-center justify-between bg-slate-50 hover:bg-violet-50 border border-slate-200 hover:border-violet-200 rounded-xl px-3 py-2.5 transition-all group"
+        >
+          <div className="flex items-center gap-2">
+            <span className="text-base">📝</span>
+            <div className="text-left">
+              <p className="text-xs font-black text-slate-700 group-hover:text-violet-700 transition-colors">
+                {assignment.submissionsCount} Submission
+                {assignment.submissionsCount !== 1 ? "s" : ""}
+              </p>
+              <p className="text-xs text-slate-400">Click to view & grade</p>
+            </div>
+          </div>
+          <span className="text-xs font-bold text-violet-500 group-hover:text-violet-700 transition-colors">
+            View →
+          </span>
+        </button>
+
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <span className="text-xs text-slate-400 flex items-center gap-1">
               👁 <span className="font-semibold">{assignment.views}</span>
-            </span>
-            <span className="text-xs text-slate-400 flex items-center gap-1">
-              📝{" "}
-              <span className="font-semibold">
-                {assignment.submissionsCount}
-              </span>{" "}
-              submitted
             </span>
           </div>
           <span className="text-xs text-slate-400">
@@ -919,20 +1487,11 @@ function AssignmentCard({
           </span>
         </div>
 
-        {/* Action buttons */}
         <div className="flex gap-2 pt-1 border-t border-slate-50">
-          {/* Preview only enabled when there's an attached file */}
           <button
             onClick={() => assignment.fileName && onPreview(assignment)}
             disabled={!assignment.fileName}
-            className={`flex-1 flex items-center justify-center gap-1.5 text-xs font-bold py-2 rounded-xl transition-colors ${
-              assignment.fileName
-                ? "text-violet-700 bg-violet-50 hover:bg-violet-100"
-                : "text-slate-400 bg-slate-50 cursor-not-allowed"
-            }`}
-            title={
-              assignment.fileName ? "Preview PDF" : "No attachment to preview"
-            }
+            className={`flex-1 flex items-center justify-center gap-1.5 text-xs font-bold py-2 rounded-xl transition-colors ${assignment.fileName ? "text-violet-700 bg-violet-50 hover:bg-violet-100" : "text-slate-400 bg-slate-50 cursor-not-allowed"}`}
           >
             👁 Preview
           </button>
@@ -960,15 +1519,14 @@ export default function InstructorAssignmentsPage() {
   const [pagination, setPagination] = useState<Pagination | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Filters
   const [search, setSearch] = useState("");
   const [filterSubject, setFilterSubject] = useState("");
   const [filterClass, setFilterClass] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [sort, setSort] = useState("newest");
   const [page, setPage] = useState(1);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
 
-  // Modal state
   const [showModal, setShowModal] = useState(false);
   const [editAssignment, setEditAssignment] = useState<Assignment | undefined>(
     undefined,
@@ -979,20 +1537,19 @@ export default function InstructorAssignmentsPage() {
   const [previewAssignment, setPreviewAssignment] = useState<
     Assignment | undefined
   >(undefined);
+  const [submissionsAssignment, setSubmissionsAssignment] = useState<
+    Assignment | undefined
+  >(undefined);
 
-  // Debounced search
-  const [debouncedSearch, setDebouncedSearch] = useState("");
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 400);
     return () => clearTimeout(t);
   }, [search]);
 
-  // Reset page on filter change
   useEffect(() => {
     setPage(1);
   }, [debouncedSearch, filterSubject, filterClass, filterStatus, sort]);
 
-  // Fetch assignments
   const fetchAssignments = useCallback(async () => {
     setLoading(true);
     try {
@@ -1053,7 +1610,6 @@ export default function InstructorAssignmentsPage() {
 
   return (
     <div className="space-y-6">
-      {/* ── Page Header ─────────────────────────────────────────────── */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-2xl bg-linear-to-br from-violet-500 to-purple-600 flex items-center justify-center text-xl shadow-sm">
@@ -1081,17 +1637,17 @@ export default function InstructorAssignmentsPage() {
         </button>
       </div>
 
-      {/* ── Filters Bar ─────────────────────────────────────────────── */}
+      {/* Filters */}
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4 flex flex-col sm:flex-row gap-3 flex-wrap">
         <div className="relative flex-1 min-w-48">
-          <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-base">
+          <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
             🔍
           </span>
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search assignments…"
-            className="w-full pl-9 pr-4 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all"
+            className="w-full pl-9 pr-4 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
           />
           {search && (
             <button
@@ -1102,11 +1658,10 @@ export default function InstructorAssignmentsPage() {
             </button>
           )}
         </div>
-
         <select
           value={filterSubject}
           onChange={(e) => setFilterSubject(e.target.value)}
-          className="border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white transition-all min-w-40"
+          className="border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white min-w-40"
         >
           <option value="">All Subjects</option>
           {SUBJECTS.map((s) => (
@@ -1115,11 +1670,10 @@ export default function InstructorAssignmentsPage() {
             </option>
           ))}
         </select>
-
         <select
           value={filterClass}
           onChange={(e) => setFilterClass(e.target.value)}
-          className="border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white transition-all min-w-36"
+          className="border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white min-w-36"
         >
           <option value="">All Classes</option>
           {CLASS_LEVELS.map((c) => (
@@ -1128,11 +1682,10 @@ export default function InstructorAssignmentsPage() {
             </option>
           ))}
         </select>
-
         <select
           value={filterStatus}
           onChange={(e) => setFilterStatus(e.target.value)}
-          className="border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white transition-all min-w-36"
+          className="border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white min-w-36"
         >
           <option value="">All Statuses</option>
           {STATUS_OPTIONS.map((s) => (
@@ -1141,18 +1694,16 @@ export default function InstructorAssignmentsPage() {
             </option>
           ))}
         </select>
-
         <select
           value={sort}
           onChange={(e) => setSort(e.target.value)}
-          className="border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white transition-all min-w-36"
+          className="border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white min-w-36"
         >
           <option value="newest">Newest First</option>
           <option value="oldest">Oldest First</option>
           <option value="title">Title A–Z</option>
           <option value="dueDate">Due Date</option>
         </select>
-
         {isFiltered && (
           <button
             onClick={() => {
@@ -1169,7 +1720,7 @@ export default function InstructorAssignmentsPage() {
         )}
       </div>
 
-      {/* ── Assignments Grid ─────────────────────────────────────────── */}
+      {/* Grid */}
       {loading ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {Array.from({ length: 6 }).map((_, i) => (
@@ -1193,12 +1744,13 @@ export default function InstructorAssignmentsPage() {
                 setShowModal(true);
               }}
               onDelete={(a) => setDeleteAssignment(a)}
+              onViewSubmissions={(a) => setSubmissionsAssignment(a)}
             />
           ))}
         </div>
       )}
 
-      {/* ── Pagination ──────────────────────────────────────────────── */}
+      {/* Pagination */}
       {pagination && pagination.totalPages > 1 && (
         <div className="flex items-center justify-between bg-white rounded-2xl border border-slate-100 shadow-sm px-5 py-3.5">
           <p className="text-xs text-slate-500 font-medium">
@@ -1219,7 +1771,6 @@ export default function InstructorAssignmentsPage() {
             >
               ‹
             </button>
-
             {Array.from({ length: pagination.totalPages }, (_, i) => i + 1)
               .filter(
                 (p) =>
@@ -1245,17 +1796,12 @@ export default function InstructorAssignmentsPage() {
                   <button
                     key={p}
                     onClick={() => setPage(p as number)}
-                    className={`w-8 h-8 rounded-xl text-xs font-bold transition-all ${
-                      pagination.page === p
-                        ? "bg-linear-to-r from-violet-600 to-purple-600 text-white shadow-md"
-                        : "border border-slate-200 text-slate-600 hover:bg-violet-50 hover:border-violet-200 hover:text-violet-700"
-                    }`}
+                    className={`w-8 h-8 rounded-xl text-xs font-bold transition-all ${pagination.page === p ? "bg-linear-to-r from-violet-600 to-purple-600 text-white shadow-md" : "border border-slate-200 text-slate-600 hover:bg-violet-50 hover:text-violet-700"}`}
                   >
                     {p}
                   </button>
                 ),
               )}
-
             <button
               onClick={() => setPage((p) => p + 1)}
               disabled={!pagination.hasNextPage}
@@ -1267,7 +1813,7 @@ export default function InstructorAssignmentsPage() {
         </div>
       )}
 
-      {/* ── Modals ──────────────────────────────────────────────────── */}
+      {/* Modals */}
       {showModal && (
         <AssignmentModal
           mode={editAssignment ? "edit" : "create"}
@@ -1288,8 +1834,26 @@ export default function InstructorAssignmentsPage() {
       )}
       {previewAssignment && (
         <PDFPreviewModal
-          assignment={previewAssignment}
+          url={`/api/assignment/${previewAssignment._id}/preview`}
+          title={previewAssignment.title}
+          fileName={previewAssignment.fileName}
+          fileSize={previewAssignment.fileSize}
           onClose={() => setPreviewAssignment(undefined)}
+        />
+      )}
+      {submissionsAssignment && (
+        <SubmissionsDrawer
+          assignment={submissionsAssignment}
+          onClose={() => setSubmissionsAssignment(undefined)}
+          onSubmissionsChange={(count) => {
+            setAssignments((prev) =>
+              prev.map((a) =>
+                a._id === submissionsAssignment._id
+                  ? { ...a, submissionsCount: count }
+                  : a,
+              ),
+            );
+          }}
         />
       )}
     </div>

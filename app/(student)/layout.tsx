@@ -29,11 +29,11 @@ export const useUser = () => useContext(UserContext);
 // ─── Nav Items ────────────────────────────────────────────────────────────────
 const navItems = [
   { icon: "🏠", label: "Dashboard", href: "/dashboard" },
-  { icon: "📚", label: "Subjects", href: "/dashboard/subjects" },
   { icon: "📋", label: "Assignments", href: "/dashboard/assignments" },
-  { icon: "🧠", label: "Quizzes", href: "/dashboard/quizzes" },
+  { icon: "📚", label: "Quizzes", href: "/dashboard/quizzes" },
+  { icon: "🎥", label: "Video Course", href: "/dashboard/video-course" },
   { icon: "📊", label: "Progress", href: "/dashboard/progress" },
-  { icon: "📣", label: "Notices", href: "/dashboard/announcements" },
+  { icon: "📣", label: "Announcements", href: "/dashboard/announcements" },
   { icon: "👤", label: "Profile", href: "/dashboard/profile" },
 ];
 
