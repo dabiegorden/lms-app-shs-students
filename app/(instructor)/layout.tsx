@@ -35,14 +35,14 @@ const navItems = [
   },
   { icon: "🧠", label: "Quizzes", href: "/instructor-dashboard/quizzes" },
   {
+    icon: "🎥",
+    label: "Video Course",
+    href: "/instructor-dashboard/video-course",
+  },
+  {
     icon: "📣",
     label: "Announcements",
     href: "/instructor-dashboard/announcements",
-  },
-  {
-    icon: "📋",
-    label: "Submissions",
-    href: "/instructor-dashboard/submissions",
   },
   {
     icon: "📈",
