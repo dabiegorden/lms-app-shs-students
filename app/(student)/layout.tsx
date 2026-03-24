@@ -31,8 +31,8 @@ const navItems = [
   { icon: "🏠", label: "Dashboard", href: "/dashboard" },
   { icon: "📋", label: "Assignments", href: "/dashboard/assignments" },
   { icon: "📚", label: "Quizzes", href: "/dashboard/quizzes" },
+  { icon: "📚", label: "Lecture Notes", href: "/dashboard/notes" },
   { icon: "🎥", label: "Video Course", href: "/dashboard/video-course" },
-  { icon: "📊", label: "Progress", href: "/dashboard/progress" },
   { icon: "📣", label: "Announcements", href: "/dashboard/announcements" },
   { icon: "👤", label: "Profile", href: "/dashboard/profile" },
 ];
@@ -220,7 +220,7 @@ function TopHeader({
       <div className="flex items-center gap-2 shrink-0">
         {/* Notifications */}
         <Link
-          href="/dashboard/notifications"
+          href="/dashboard/announcements"
           className="relative w-9 h-9 rounded-xl hover:bg-blue-50 flex items-center justify-center transition-colors"
         >
           <span className="text-lg">🔔</span>
