@@ -1,10 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { performances, users } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Performance from "@/models/Performance";
+import { toLegacy } from "@/lib/serialize";
 import { GoogleGenAI } from "@google/genai";
 
-// ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireInstructor(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
@@ -13,8 +14,41 @@ function requireInstructor(req: NextRequest) {
   return user;
 }
 
+const performanceWithStudentSelect = {
+  id: performances.id,
+  studentId: performances.studentId,
+  instructorId: performances.instructorId,
+  totalActivities: performances.totalActivities,
+  totalScore: performances.totalScore,
+  totalMaxScore: performances.totalMaxScore,
+  overallPercentage: performances.overallPercentage,
+  quizCount: performances.quizCount,
+  quizTotalScore: performances.quizTotalScore,
+  quizTotalMaxScore: performances.quizTotalMaxScore,
+  quizAveragePercentage: performances.quizAveragePercentage,
+  assignmentCount: performances.assignmentCount,
+  assignmentTotalScore: performances.assignmentTotalScore,
+  assignmentTotalMaxScore: performances.assignmentTotalMaxScore,
+  assignmentAveragePercentage: performances.assignmentAveragePercentage,
+  subjectStats: performances.subjectStats,
+  recentActivity: performances.recentActivity,
+  aiInsight: performances.aiInsight,
+  aiInsightGeneratedAt: performances.aiInsightGeneratedAt,
+  lastActivityAt: performances.lastActivityAt,
+  createdAt: performances.createdAt,
+  updatedAt: performances.updatedAt,
+  student: {
+    id: users.id,
+    name: users.name,
+    email: users.email,
+    profilePicture: users.profilePicture,
+    classLevel: users.classLevel,
+    school: users.school,
+    programme: users.programme,
+  },
+} as const;
+
 // ─── GET /api/performance/[studentId] ────────────────────────────────────────
-// Full performance profile for a single student (instructor-scoped)
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ studentId: string }> },
@@ -29,17 +63,18 @@ export async function GET(
     }
 
     const { studentId } = await params;
-    await connectDB();
 
-    const performance = await Performance.findOne({
-      student: studentId,
-      instructor: auth.userId,
-    })
-      .populate(
-        "student",
-        "name email profilePicture classLevel school programme",
+    const [performance] = await db
+      .select(performanceWithStudentSelect)
+      .from(performances)
+      .innerJoin(users, eq(performances.studentId, users.id))
+      .where(
+        and(
+          eq(performances.studentId, studentId),
+          eq(performances.instructorId, auth.userId),
+        ),
       )
-      .lean();
+      .limit(1);
 
     if (!performance) {
       return NextResponse.json(
@@ -52,7 +87,7 @@ export async function GET(
     }
 
     return NextResponse.json(
-      { success: true, data: performance },
+      { success: true, data: toLegacy(performance) },
       { status: 200 },
     );
   } catch (error: any) {
@@ -64,8 +99,7 @@ export async function GET(
   }
 }
 
-// ─── POST /api/performance/[studentId]/ai-insight ────────────────────────────
-// Regenerate the AI insight for a student using Gemini
+// ─── POST /api/performance/[studentId] — regenerate AI insight ───────────────
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ studentId: string }> },
@@ -80,12 +114,18 @@ export async function POST(
     }
 
     const { studentId } = await params;
-    await connectDB();
 
-    const performance = await Performance.findOne({
-      student: studentId,
-      instructor: auth.userId,
-    }).populate("student", "name classLevel");
+    const [performance] = await db
+      .select(performanceWithStudentSelect)
+      .from(performances)
+      .innerJoin(users, eq(performances.studentId, users.id))
+      .where(
+        and(
+          eq(performances.studentId, studentId),
+          eq(performances.instructorId, auth.userId),
+        ),
+      )
+      .limit(1);
 
     if (!performance) {
       return NextResponse.json(
@@ -94,9 +134,8 @@ export async function POST(
       );
     }
 
-    // ── Build Gemini prompt ────────────────────────────────────────────────
-    const studentName = (performance.student as any)?.name ?? "This student";
-    const classLevel = (performance.student as any)?.classLevel ?? "SHS";
+    const studentName = performance.student?.name ?? "This student";
+    const classLevel = performance.student?.classLevel ?? "SHS";
 
     const subjectSummary = performance.subjectStats
       .map(
@@ -113,7 +152,7 @@ export async function POST(
       )
       .join("; ");
 
-    const prompt = `You are an educational performance analyst for a Ghanaian high school LMS. 
+    const prompt = `You are an educational performance analyst for a Ghanaian high school LMS.
 Analyse this student's academic performance and provide actionable feedback.
 
 Student: ${studentName} (${classLevel})
@@ -141,14 +180,15 @@ Do NOT use markdown formatting. Write plain paragraphs only.`;
     });
 
     const insight = response.text?.trim() ?? "";
+    const generatedAt = new Date();
 
-    // ── Persist the insight ────────────────────────────────────────────────
-    performance.aiInsight = insight;
-    performance.aiInsightGeneratedAt = new Date();
-    await performance.save();
+    await db
+      .update(performances)
+      .set({ aiInsight: insight, aiInsightGeneratedAt: generatedAt })
+      .where(eq(performances.id, performance.id));
 
     return NextResponse.json(
-      { success: true, insight, generatedAt: performance.aiInsightGeneratedAt },
+      { success: true, insight, generatedAt },
       { status: 200 },
     );
   } catch (error: any) {

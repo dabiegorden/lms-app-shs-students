@@ -1,11 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { courses } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Course from "@/models/Course";
-import CourseEnrollment from "@/models/Courseenrollment";
-import mongoose from "mongoose";
+import { isUuid } from "@/lib/validation";
+import { toLegacy } from "@/lib/serialize";
 
-// ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireStudent(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
@@ -15,7 +15,6 @@ function requireStudent(req: NextRequest) {
 }
 
 // ─── GET /api/student/courses/[id] ───────────────────────────────────────────
-// Returns the full published course with sections/lessons (no answers).
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -31,19 +30,18 @@ export async function GET(
 
     const { id } = await params;
 
-    // Guard: reject obviously invalid IDs before hitting MongoDB
-    if (!id || id === "undefined" || !id.match(/^[a-f\d]{24}$/i)) {
+    if (!isUuid(id)) {
       return NextResponse.json(
         { success: false, message: "Invalid course ID." },
         { status: 400 },
       );
     }
 
-    await connectDB();
-
-    const course = await Course.findOne({ _id: id, status: "published" })
-      .select("-thumbnailPath -instructor")
-      .lean();
+    const [course] = await db
+      .select()
+      .from(courses)
+      .where(and(eq(courses.id, id), eq(courses.status, "published")))
+      .limit(1);
 
     if (!course) {
       return NextResponse.json(
@@ -52,7 +50,11 @@ export async function GET(
       );
     }
 
-    return NextResponse.json({ success: true, data: course }, { status: 200 });
+    const { thumbnailPath: _tp, instructorId: _i, ...safe } = course;
+    return NextResponse.json(
+      { success: true, data: toLegacy(safe) },
+      { status: 200 },
+    );
   } catch (error: any) {
     console.error("[STUDENT GET COURSE ERROR]", error);
     return NextResponse.json(

@@ -1,7 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { quizzes } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Quiz from "@/models/Quiz";
+import { toLegacy } from "@/lib/serialize";
+import { buildQuestions, computeTotalMarks } from "@/lib/quiz-utils";
+import { validateQuestions } from "../route";
 
 // ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireInstructor(req: NextRequest) {
@@ -13,7 +17,6 @@ function requireInstructor(req: NextRequest) {
 }
 
 // ─── GET /api/quiz/[id] ───────────────────────────────────────────────────────
-// Returns the full quiz including correctOption and modelAnswer (instructor only)
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -28,12 +31,13 @@ export async function GET(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    const quiz = await Quiz.findOne({
-      _id: id,
-      instructor: auth.userId,
-    }).lean();
+    const [quiz] = await db
+      .select()
+      .from(quizzes)
+      .where(and(eq(quizzes.id, id), eq(quizzes.instructorId, auth.userId)))
+      .limit(1);
+
     if (!quiz) {
       return NextResponse.json(
         { success: false, message: "Quiz not found." },
@@ -41,7 +45,10 @@ export async function GET(
       );
     }
 
-    return NextResponse.json({ success: true, data: quiz }, { status: 200 });
+    return NextResponse.json(
+      { success: true, data: toLegacy(quiz) },
+      { status: 200 },
+    );
   } catch (error: any) {
     console.error("[GET QUIZ ERROR]", error);
     return NextResponse.json(
@@ -52,7 +59,6 @@ export async function GET(
 }
 
 // ─── PATCH /api/quiz/[id] ─────────────────────────────────────────────────────
-// Body: JSON — all fields optional. Passing `questions` replaces the entire array.
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -67,9 +73,13 @@ export async function PATCH(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    const quiz = await Quiz.findOne({ _id: id, instructor: auth.userId });
+    const [quiz] = await db
+      .select()
+      .from(quizzes)
+      .where(and(eq(quizzes.id, id), eq(quizzes.instructorId, auth.userId)))
+      .limit(1);
+
     if (!quiz) {
       return NextResponse.json(
         { success: false, message: "Quiz not found." },
@@ -92,21 +102,22 @@ export async function PATCH(
       questions,
     } = body;
 
-    // ── Apply updates ──────────────────────────────────────────────────────
-    if (title?.trim()) quiz.title = title.trim();
-    if (subject?.trim()) quiz.subject = subject.trim();
+    const updates: Partial<typeof quizzes.$inferInsert> = {};
+
+    if (title?.trim()) updates.title = title.trim();
+    if (subject?.trim()) updates.subject = subject.trim();
     if (dueDateRaw && !isNaN(Date.parse(dueDateRaw)))
-      quiz.dueDate = new Date(dueDateRaw);
-    if (description !== undefined) quiz.description = description.trim();
-    if (topic !== undefined) quiz.topic = topic.trim();
-    if (classLevel) quiz.classLevel = classLevel;
+      updates.dueDate = new Date(dueDateRaw);
+    if (description !== undefined) updates.description = description.trim();
+    if (topic !== undefined) updates.topic = topic.trim();
+    if (classLevel) updates.classLevel = classLevel;
     if (durationMinutes !== undefined)
-      quiz.durationMinutes = durationMinutes ? Number(durationMinutes) : null;
+      updates.durationMinutes = durationMinutes ? Number(durationMinutes) : null;
     if (allowLateSubmission !== undefined)
-      quiz.allowLateSubmission = Boolean(allowLateSubmission);
+      updates.allowLateSubmission = Boolean(allowLateSubmission);
     if (shuffleQuestions !== undefined)
-      quiz.shuffleQuestions = Boolean(shuffleQuestions);
-    if (status) quiz.status = status;
+      updates.shuffleQuestions = Boolean(shuffleQuestions);
+    if (status) updates.status = status;
 
     // ── Replace questions array if provided ────────────────────────────────
     if (Array.isArray(questions)) {
@@ -116,65 +127,30 @@ export async function PATCH(
           { status: 400 },
         );
       }
-      // Validate
-      for (let i = 0; i < questions.length; i++) {
-        const q = questions[i];
-        if (!q.type || !["mcq", "theory"].includes(q.type)) {
-          return NextResponse.json(
-            {
-              success: false,
-              message: `Question ${i + 1}: type must be "mcq" or "theory".`,
-            },
-            { status: 400 },
-          );
-        }
-        if (!q.text?.trim()) {
-          return NextResponse.json(
-            { success: false, message: `Question ${i + 1}: text is required.` },
-            { status: 400 },
-          );
-        }
-        if (
-          q.type === "mcq" &&
-          (!Array.isArray(q.options) || q.options.length < 2)
-        ) {
-          return NextResponse.json(
-            {
-              success: false,
-              message: `Question ${i + 1}: MCQ requires at least 2 options.`,
-            },
-            { status: 400 },
-          );
-        }
-        if (q.type === "mcq" && !q.correctOption) {
-          return NextResponse.json(
-            {
-              success: false,
-              message: `Question ${i + 1}: MCQ must have a correct option.`,
-            },
-            { status: 400 },
-          );
-        }
+      const validationError = validateQuestions(questions);
+      if (validationError) {
+        return NextResponse.json(
+          { success: false, message: validationError },
+          { status: 400 },
+        );
       }
 
-      quiz.questions = questions.map((q: any, idx: number) => ({
-        type: q.type,
-        text: q.text.trim(),
-        marks: Number(q.marks) || 1,
-        options: q.type === "mcq" ? q.options : [],
-        correctOption: q.type === "mcq" ? q.correctOption : null,
-        modelAnswer: q.type === "theory" ? (q.modelAnswer?.trim() ?? "") : "",
-        order: q.order ?? idx,
-      }));
+      const builtQuestions = buildQuestions(questions);
+      updates.questions = builtQuestions;
+      updates.totalMarks = computeTotalMarks(builtQuestions);
     }
 
-    await quiz.save(); // triggers pre-save totalMarks computation
+    const [updated] = await db
+      .update(quizzes)
+      .set(updates)
+      .where(eq(quizzes.id, quiz.id))
+      .returning();
 
     return NextResponse.json(
       {
         success: true,
         message: "Quiz updated successfully.",
-        data: quiz.toObject(),
+        data: toLegacy(updated),
       },
       { status: 200 },
     );
@@ -202,9 +178,13 @@ export async function DELETE(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    const quiz = await Quiz.findOne({ _id: id, instructor: auth.userId });
+    const [quiz] = await db
+      .select({ id: quizzes.id })
+      .from(quizzes)
+      .where(and(eq(quizzes.id, id), eq(quizzes.instructorId, auth.userId)))
+      .limit(1);
+
     if (!quiz) {
       return NextResponse.json(
         { success: false, message: "Quiz not found." },
@@ -212,7 +192,7 @@ export async function DELETE(
       );
     }
 
-    await Quiz.deleteOne({ _id: id });
+    await db.delete(quizzes).where(eq(quizzes.id, id));
 
     return NextResponse.json(
       { success: true, message: "Quiz deleted successfully." },

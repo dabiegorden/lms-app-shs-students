@@ -1,9 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, eq, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { announcements, announcementComments, users } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Announcement from "@/models/Announcement";
+import { toLegacy } from "@/lib/serialize";
 import { deleteManyFromCloudinary } from "@/lib/Cloudinaryupload";
-import AnnouncementComment from "@/models/Announcementcomment";
+import { commentSelect } from "../route";
 
 function requireAuth(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
@@ -13,7 +15,6 @@ function requireAuth(req: NextRequest) {
 
 // ─── PATCH /api/announcement/[id]/comments/[commentId] ────────────────────────
 // Edit comment body (author only) or toggle like (any authenticated user)
-// Body: JSON { body?: string, like?: boolean }
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; commentId: string }> },
@@ -27,9 +28,13 @@ export async function PATCH(
       );
 
     const { commentId } = await params;
-    await connectDB();
 
-    const comment = await AnnouncementComment.findById(commentId);
+    const [comment] = await db
+      .select()
+      .from(announcementComments)
+      .where(eq(announcementComments.id, commentId))
+      .limit(1);
+
     if (!comment || comment.isDeleted) {
       return NextResponse.json(
         { success: false, message: "Comment not found." },
@@ -41,32 +46,27 @@ export async function PATCH(
 
     // ── Like / Unlike ────────────────────────────────────────────────────────
     if (body.like !== undefined) {
-      const userId = auth.userId as any;
-      const alreadyLiked = comment.likes.some(
-        (id: any) => String(id) === String(userId),
-      );
-      if (alreadyLiked) {
-        comment.likes = comment.likes.filter(
-          (id: any) => String(id) !== String(userId),
-        );
-        comment.likesCount = Math.max(0, comment.likesCount - 1);
-      } else {
-        comment.likes.push(userId);
-        comment.likesCount += 1;
-      }
-      await comment.save();
+      const userId = auth.userId;
+      const alreadyLiked = comment.likes.some((u) => String(u) === userId);
+      const likes = alreadyLiked
+        ? comment.likes.filter((u) => String(u) !== userId)
+        : [...comment.likes, userId];
+      const likesCount = likes.length;
+
+      await db
+        .update(announcementComments)
+        .set({ likes, likesCount })
+        .where(eq(announcementComments.id, commentId));
+
       return NextResponse.json(
-        {
-          success: true,
-          data: { likesCount: comment.likesCount, liked: !alreadyLiked },
-        },
+        { success: true, data: { likesCount, liked: !alreadyLiked } },
         { status: 200 },
       );
     }
 
     // ── Edit body (author only) ───────────────────────────────────────────────
     if (body.body !== undefined) {
-      if (String(comment.author) !== String(auth.userId)) {
+      if (String(comment.authorId) !== String(auth.userId)) {
         return NextResponse.json(
           { success: false, message: "You can only edit your own comments." },
           { status: 403 },
@@ -78,13 +78,25 @@ export async function PATCH(
           { status: 400 },
         );
       }
-      comment.body = body.body.trim();
-      comment.isEdited = true;
-      comment.editedAt = new Date();
-      await comment.save();
-      await comment.populate("author", "name email avatar role");
+
+      await db
+        .update(announcementComments)
+        .set({
+          body: body.body.trim(),
+          isEdited: true,
+          editedAt: new Date(),
+        })
+        .where(eq(announcementComments.id, commentId));
+
+      const [withAuthor] = await db
+        .select(commentSelect)
+        .from(announcementComments)
+        .innerJoin(users, eq(announcementComments.authorId, users.id))
+        .where(eq(announcementComments.id, commentId))
+        .limit(1);
+
       return NextResponse.json(
-        { success: true, data: comment.toObject() },
+        { success: true, data: toLegacy(withAuthor) },
         { status: 200 },
       );
     }
@@ -103,8 +115,6 @@ export async function PATCH(
 }
 
 // ─── DELETE /api/announcement/[id]/comments/[commentId] ───────────────────────
-// Author can delete their own comment; instructor can delete any comment on their announcement.
-// Soft-delete: keeps the shell but clears body and attachments.
 export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; commentId: string }> },
@@ -118,9 +128,13 @@ export async function DELETE(
       );
 
     const { id, commentId } = await params;
-    await connectDB();
 
-    const comment = await AnnouncementComment.findById(commentId);
+    const [comment] = await db
+      .select()
+      .from(announcementComments)
+      .where(eq(announcementComments.id, commentId))
+      .limit(1);
+
     if (!comment || comment.isDeleted) {
       return NextResponse.json(
         { success: false, message: "Comment not found." },
@@ -128,14 +142,20 @@ export async function DELETE(
       );
     }
 
-    // Check permission: own comment OR instructor who owns the announcement
-    const isOwn = String(comment.author) === String(auth.userId);
+    // Permission: own comment OR instructor who owns the announcement
+    const isOwn = String(comment.authorId) === String(auth.userId);
     let isAnnouncementInstructor = false;
     if (!isOwn && auth.role === "instructor") {
-      const ann = await Announcement.findOne({
-        _id: id,
-        instructor: auth.userId,
-      }).select("_id");
+      const [ann] = await db
+        .select({ id: announcements.id })
+        .from(announcements)
+        .where(
+          and(
+            eq(announcements.id, id),
+            eq(announcements.instructorId, auth.userId),
+          ),
+        )
+        .limit(1);
       isAnnouncementInstructor = !!ann;
     }
 
@@ -152,20 +172,22 @@ export async function DELETE(
     }
 
     // Soft-delete
-    comment.isDeleted = true;
-    comment.body = "";
-    comment.attachments = [];
-    await comment.save();
+    await db
+      .update(announcementComments)
+      .set({ isDeleted: true, body: "", attachments: [] })
+      .where(eq(announcementComments.id, commentId));
 
-    // Decrement counts
-    Announcement.findByIdAndUpdate(id, { $inc: { commentsCount: -1 } })
-      .exec()
+    // Decrement counts (fire-and-forget)
+    db.update(announcements)
+      .set({ commentsCount: sql`GREATEST(${announcements.commentsCount} - 1, 0)` })
+      .where(eq(announcements.id, id))
       .catch(() => {});
-    if (comment.parentComment) {
-      AnnouncementComment.findByIdAndUpdate(comment.parentComment, {
-        $inc: { repliesCount: -1 },
-      })
-        .exec()
+    if (comment.parentCommentId) {
+      db.update(announcementComments)
+        .set({
+          repliesCount: sql`GREATEST(${announcementComments.repliesCount} - 1, 0)`,
+        })
+        .where(eq(announcementComments.id, comment.parentCommentId))
         .catch(() => {});
     }
 

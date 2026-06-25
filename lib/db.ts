@@ -1,50 +1,15 @@
-import mongoose, { type Mongoose } from "mongoose";
-
-const MONGODB_URL = process.env.MONGODB_URL as string;
-
-if (!MONGODB_URL) {
-  throw new Error(
-    "Please define the MONGODB_URL environment variable inside .env.local",
-  );
-}
-
 /**
- * In Next.js (App Router), we cache the DB connection on the global object
- * to avoid creating new connections on every hot reload or route call.
+ * Database access layer.
+ *
+ * The project migrated from MongoDB/Mongoose to PostgreSQL (Neon) + Drizzle ORM.
+ * `db` is the Drizzle client. `connectDB()` is kept as a no-op compatibility
+ * helper so existing route handlers that `await connectDB()` continue to work —
+ * Neon's HTTP driver is connectionless, so there is nothing to "connect".
  */
+import { db, schema } from "@/src/db";
 
-declare global {
-  var myMongoose:
-    | {
-        conn: Mongoose | null;
-        promise: Promise<Mongoose> | null;
-      }
-    | undefined;
-}
+export { db, schema };
 
-let cached = global.myMongoose;
-
-if (!cached) {
-  cached = global.myMongoose = { conn: null, promise: null };
-}
-
-export async function connectDB(): Promise<Mongoose> {
-  if (cached!.conn) return cached!.conn;
-  if (cached!.promise) return cached!.promise;
-
-  const opts = { bufferCommands: false };
-
-  cached!.promise = mongoose
-    .connect(MONGODB_URL, opts)
-    .then((mongooseInstance) => mongooseInstance);
-
-  try {
-    cached!.conn = await cached!.promise;
-    console.log("MongoDB is connected");
-  } catch (err) {
-    cached!.promise = null;
-    throw err;
-  }
-
-  return cached!.conn;
+export async function connectDB() {
+  return db;
 }

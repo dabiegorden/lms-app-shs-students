@@ -1,10 +1,16 @@
 import { type NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { connectDB } from "@/lib/db";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { courses } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Course from "@/models/Course";
-import { extractYouTubeId } from "../route";
+import { toLegacy } from "@/lib/serialize";
+import {
+  extractYouTubeId,
+  computeCourseTotals,
+  normalizeSections,
+} from "@/lib/course-utils";
 
 const MAX_THUMBNAIL_SIZE = 5 * 1024 * 1024;
 const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads", "courses");
@@ -33,7 +39,6 @@ async function deleteFile(filePath: string) {
 }
 
 // ─── GET /api/course/[id] ─────────────────────────────────────────────────────
-// Returns full course including sections/lessons with correctOption-equivalent data
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -47,20 +52,24 @@ export async function GET(
       );
 
     const { id } = await params;
-    await connectDB();
 
-    const course = await Course.findOne({
-      _id: id,
-      instructor: auth.userId,
-    }).lean();
+    const [course] = await db
+      .select()
+      .from(courses)
+      .where(and(eq(courses.id, id), eq(courses.instructorId, auth.userId)))
+      .limit(1);
+
     if (!course)
       return NextResponse.json(
         { success: false, message: "Course not found." },
         { status: 404 },
       );
 
-    const { thumbnailPath: _tp, ...safe } = course as any;
-    return NextResponse.json({ success: true, data: safe }, { status: 200 });
+    const { thumbnailPath: _tp, ...safe } = course;
+    return NextResponse.json(
+      { success: true, data: toLegacy(safe) },
+      { status: 200 },
+    );
   } catch (error: any) {
     console.error("[GET COURSE ERROR]", error);
     return NextResponse.json(
@@ -71,10 +80,6 @@ export async function GET(
 }
 
 // ─── PATCH /api/course/[id] ───────────────────────────────────────────────────
-// Body: multipart/form-data
-// Sending `sections` (JSON string) replaces the entire curriculum.
-// All other fields are optional patches.
-// Send removeThumbnail="true" to remove the existing image.
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -88,9 +93,13 @@ export async function PATCH(
       );
 
     const { id } = await params;
-    await connectDB();
 
-    const course = await Course.findOne({ _id: id, instructor: auth.userId });
+    const [course] = await db
+      .select()
+      .from(courses)
+      .where(and(eq(courses.id, id), eq(courses.instructorId, auth.userId)))
+      .limit(1);
+
     if (!course)
       return NextResponse.json(
         { success: false, message: "Course not found." },
@@ -99,7 +108,6 @@ export async function PATCH(
 
     const formData = await req.formData();
 
-    // ── Text fields ──────────────────────────────────────────────────────────
     const title = formData.get("title") as string | null;
     const subject = formData.get("subject") as string | null;
     const description = formData.get("description") as string | null;
@@ -117,7 +125,6 @@ export async function PATCH(
     const thumbnail = formData.get("thumbnail") as File | null;
     const sectionsRaw = formData.get("sections") as string | null;
 
-    // Parse array fields
     const safeParseArray = (
       val: FormDataEntryValue | null,
     ): string[] | null => {
@@ -132,34 +139,35 @@ export async function PATCH(
     const requirements = safeParseArray(formData.get("requirements"));
     const targetAudience = safeParseArray(formData.get("targetAudience"));
 
+    const updates: Partial<typeof courses.$inferInsert> = {};
+
     // ── Apply text patches ───────────────────────────────────────────────────
-    if (title?.trim()) course.title = title.trim();
-    if (subject?.trim()) course.subject = subject.trim();
-    if (description !== null) course.description = description.trim();
-    if (overview !== null) course.overview = overview.trim();
-    if (topic !== null) course.topic = topic.trim();
-    if (classLevel) course.classLevel = classLevel as any;
-    if (language) course.language = language;
-    if (level) course.level = level as any;
-    if (status) course.status = status as any;
+    if (title?.trim()) updates.title = title.trim();
+    if (subject?.trim()) updates.subject = subject.trim();
+    if (description !== null) updates.description = description.trim();
+    if (overview !== null) updates.overview = overview.trim();
+    if (topic !== null) updates.topic = topic.trim();
+    if (classLevel) updates.classLevel = classLevel as any;
+    if (language) updates.language = language;
+    if (level) updates.level = level as any;
+    if (status) updates.status = status as any;
     if (certificateEnabledRaw !== null)
-      course.certificateEnabled = certificateEnabledRaw !== "false";
-    if (whatYouWillLearn) course.whatYouWillLearn = whatYouWillLearn;
-    if (requirements) course.requirements = requirements;
-    if (targetAudience) course.targetAudience = targetAudience;
+      updates.certificateEnabled = certificateEnabledRaw !== "false";
+    if (whatYouWillLearn) updates.whatYouWillLearn = whatYouWillLearn;
+    if (requirements) updates.requirements = requirements;
+    if (targetAudience) updates.targetAudience = targetAudience;
 
     if (previewVideoUrl !== null) {
-      course.previewVideoUrl = previewVideoUrl.trim() || null;
-      course.previewVideoId = previewVideoUrl.trim()
-        ? extractYouTubeId(previewVideoUrl.trim())
-        : null;
+      const trimmed = previewVideoUrl.trim();
+      updates.previewVideoUrl = trimmed || null;
+      updates.previewVideoId = trimmed ? extractYouTubeId(trimmed) : null;
     }
 
     // ── Thumbnail handling ───────────────────────────────────────────────────
     if (removeThumbnail && (!thumbnail || thumbnail.size === 0)) {
       if (course.thumbnailPath) await deleteFile(course.thumbnailPath);
-      course.thumbnailUrl = null;
-      course.thumbnailPath = null;
+      updates.thumbnailUrl = null;
+      updates.thumbnailPath = null;
     }
 
     if (thumbnail && thumbnail.size > 0) {
@@ -184,8 +192,8 @@ export async function PATCH(
         absolutePath,
         new Uint8Array(await thumbnail.arrayBuffer()),
       );
-      course.thumbnailUrl = `${UPLOAD_URL_BASE}/${uniqueName}`;
-      course.thumbnailPath = absolutePath;
+      updates.thumbnailUrl = `${UPLOAD_URL_BASE}/${uniqueName}`;
+      updates.thumbnailPath = absolutePath;
     }
 
     // ── Replace curriculum if sections provided ──────────────────────────────
@@ -200,35 +208,26 @@ export async function PATCH(
         );
       }
 
-      course.sections = parsedSections.map((sec: any, sIdx: number) => ({
-        title: sec.title?.trim() ?? `Section ${sIdx + 1}`,
-        description: sec.description?.trim() ?? "",
-        order: sec.order ?? sIdx,
-        isPublished: sec.isPublished !== false,
-        lessons: (sec.lessons ?? []).map((les: any, lIdx: number) => {
-          const youtubeUrl = les.youtubeUrl?.trim() ?? "";
-          const youtubeVideoId =
-            les.youtubeVideoId?.trim() ||
-            (youtubeUrl ? (extractYouTubeId(youtubeUrl) ?? "") : "");
-          return {
-            title: les.title?.trim() ?? `Lesson ${lIdx + 1}`,
-            description: les.description?.trim() ?? "",
-            youtubeUrl,
-            youtubeVideoId,
-            durationSeconds: Number(les.durationSeconds) || 0,
-            order: les.order ?? lIdx,
-            isFree: Boolean(les.isFree),
-            isPublished: les.isPublished !== false,
-          };
-        }),
-      }));
+      const sections = normalizeSections(parsedSections);
+      const totals = computeCourseTotals(sections);
+      updates.sections = sections;
+      updates.totalLessons = totals.totalLessons;
+      updates.totalDurationSeconds = totals.totalDurationSeconds;
     }
 
-    await course.save(); // triggers pre-save total recomputation
+    const [updated] = await db
+      .update(courses)
+      .set(updates)
+      .where(eq(courses.id, course.id))
+      .returning();
 
-    const { thumbnailPath: _tp, ...safe } = course.toObject();
+    const { thumbnailPath: _tp, ...safe } = updated;
     return NextResponse.json(
-      { success: true, message: "Course updated successfully.", data: safe },
+      {
+        success: true,
+        message: "Course updated successfully.",
+        data: toLegacy(safe),
+      },
       { status: 200 },
     );
   } catch (error: any) {
@@ -254,9 +253,13 @@ export async function DELETE(
       );
 
     const { id } = await params;
-    await connectDB();
 
-    const course = await Course.findOne({ _id: id, instructor: auth.userId });
+    const [course] = await db
+      .select()
+      .from(courses)
+      .where(and(eq(courses.id, id), eq(courses.instructorId, auth.userId)))
+      .limit(1);
+
     if (!course)
       return NextResponse.json(
         { success: false, message: "Course not found." },
@@ -264,7 +267,7 @@ export async function DELETE(
       );
 
     if (course.thumbnailPath) await deleteFile(course.thumbnailPath);
-    await Course.deleteOne({ _id: id });
+    await db.delete(courses).where(eq(courses.id, id));
 
     return NextResponse.json(
       { success: true, message: "Course deleted successfully." },

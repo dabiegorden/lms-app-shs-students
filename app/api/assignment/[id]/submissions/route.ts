@@ -1,8 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, desc, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { assignments, submissions, users } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Assignment from "@/models/Assignment";
-import Submission from "@/models/Submission";
+import { toLegacyList } from "@/lib/serialize";
 
 function requireInstructor(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
@@ -13,11 +14,6 @@ function requireInstructor(req: NextRequest) {
 }
 
 // ─── GET /api/assignment/[id]/submissions ─────────────────────────────────────
-// Returns all student submissions for a given assignment.
-// Only the instructor who owns the assignment can access this.
-//
-// Query params:
-//   status – "submitted" | "graded" | "returned" (optional filter)
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -32,13 +28,15 @@ export async function GET(
     }
 
     const { id } = await params;
-    await connectDB();
 
     // Verify the assignment belongs to this instructor
-    const assignment = await Assignment.findOne({
-      _id: id,
-      instructor: auth.userId,
-    }).select("_id");
+    const [assignment] = await db
+      .select({ id: assignments.id })
+      .from(assignments)
+      .where(
+        and(eq(assignments.id, id), eq(assignments.instructorId, auth.userId)),
+      )
+      .limit(1);
 
     if (!assignment) {
       return NextResponse.json(
@@ -50,17 +48,38 @@ export async function GET(
     const { searchParams } = new URL(req.url);
     const statusFilter = searchParams.get("status")?.trim() ?? "";
 
-    const query: Record<string, any> = { assignment: id };
-    if (statusFilter) query.status = statusFilter;
+    const conditions = [eq(submissions.assignmentId, id)];
+    if (statusFilter)
+      conditions.push(eq(submissions.status, statusFilter as any));
 
-    const submissions = await Submission.find(query)
-      .populate("student", "name email avatar")
-      .select("-filePath") // never expose server path
-      .sort({ submittedAt: -1 })
-      .lean();
+    const rows = await db
+      .select({
+        id: submissions.id,
+        assignmentId: submissions.assignmentId,
+        submittedAt: submissions.submittedAt,
+        fileUrl: submissions.fileUrl,
+        fileName: submissions.fileName,
+        fileSize: submissions.fileSize,
+        note: submissions.note,
+        status: submissions.status,
+        score: submissions.score,
+        feedback: submissions.feedback,
+        isLate: submissions.isLate,
+        createdAt: submissions.createdAt,
+        updatedAt: submissions.updatedAt,
+        student: {
+          id: users.id,
+          name: users.name,
+          email: users.email,
+        },
+      })
+      .from(submissions)
+      .innerJoin(users, eq(submissions.studentId, users.id))
+      .where(and(...conditions))
+      .orderBy(desc(submissions.submittedAt));
 
     return NextResponse.json(
-      { success: true, data: submissions },
+      { success: true, data: toLegacyList(rows) },
       { status: 200 },
     );
   } catch (error: any) {

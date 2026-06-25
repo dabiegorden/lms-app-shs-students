@@ -1,14 +1,16 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, eq, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { announcements, announcementComments, users } from "@/src/schema";
+import type { Attachment } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Announcement from "@/models/Announcement";
+import { toLegacy } from "@/lib/serialize";
 import {
   uploadManyToCloudinary,
-  deleteFromCloudinary,
   deleteManyFromCloudinary,
   ALLOWED_TYPES,
 } from "@/lib/Cloudinaryupload";
-import AnnouncementComment from "@/models/Announcementcomment";
+import { announcementSelect } from "../route";
 
 function requireInstructor(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
@@ -38,16 +40,21 @@ export async function GET(
       );
 
     const { id } = await params;
-    await connectDB();
 
-    const query =
+    const whereClause =
       auth.role === "instructor"
-        ? { _id: id, instructor: auth.userId }
-        : { _id: id, status: "published" };
+        ? and(
+            eq(announcements.id, id),
+            eq(announcements.instructorId, auth.userId),
+          )
+        : and(eq(announcements.id, id), eq(announcements.status, "published"));
 
-    const announcement = await Announcement.findOne(query)
-      .populate("instructor", "name email avatar")
-      .lean();
+    const [announcement] = await db
+      .select(announcementSelect)
+      .from(announcements)
+      .innerJoin(users, eq(announcements.instructorId, users.id))
+      .where(whereClause)
+      .limit(1);
 
     if (!announcement) {
       return NextResponse.json(
@@ -57,12 +64,13 @@ export async function GET(
     }
 
     // Increment view count (fire-and-forget)
-    Announcement.findByIdAndUpdate(id, { $inc: { viewsCount: 1 } })
-      .exec()
+    db.update(announcements)
+      .set({ viewsCount: sql`${announcements.viewsCount} + 1` })
+      .where(eq(announcements.id, id))
       .catch(() => {});
 
     return NextResponse.json(
-      { success: true, data: announcement },
+      { success: true, data: toLegacy(announcement) },
       { status: 200 },
     );
   } catch (error: any) {
@@ -75,9 +83,6 @@ export async function GET(
 }
 
 // ─── PATCH /api/announcement/[id] ────────────────────────────────────────────
-// Body: multipart/form-data — all fields optional
-//   removeAttachments  JSON array of publicIds to delete
-//   files              new files to add (up to 5 total remaining)
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -91,12 +96,18 @@ export async function PATCH(
       );
 
     const { id } = await params;
-    await connectDB();
 
-    const announcement = await Announcement.findOne({
-      _id: id,
-      instructor: auth.userId,
-    });
+    const [announcement] = await db
+      .select()
+      .from(announcements)
+      .where(
+        and(
+          eq(announcements.id, id),
+          eq(announcements.instructorId, auth.userId),
+        ),
+      )
+      .limit(1);
+
     if (!announcement) {
       return NextResponse.json(
         { success: false, message: "Announcement not found." },
@@ -132,32 +143,42 @@ export async function PATCH(
     const targetSubjects = safeParseArray(formData.get("targetSubjects"));
     const targetCourses = safeParseArray(formData.get("targetCourses"));
 
-    // ── Apply text patches ───────────────────────────────────────────────────
-    if (title?.trim()) announcement.title = title.trim();
-    if (body?.trim()) announcement.body = body.trim();
-    if (status) announcement.status = status as any;
-    if (isPinnedRaw !== null) announcement.isPinned = isPinnedRaw === "true";
+    const updates: Partial<typeof announcements.$inferInsert> = {};
+
+    if (title?.trim()) updates.title = title.trim();
+    if (body?.trim()) updates.body = body.trim();
+    if (status) {
+      updates.status = status as any;
+      // Set publishedAt the first time it transitions to published
+      if (status === "published" && !announcement.publishedAt) {
+        updates.publishedAt = new Date();
+      }
+    }
+    if (isPinnedRaw !== null) updates.isPinned = isPinnedRaw === "true";
     if (allowCommentsRaw !== null)
-      announcement.allowComments = allowCommentsRaw !== "false";
-    if (targetType) announcement.targetType = targetType as any;
-    if (targetClassLevel) announcement.targetClassLevel = targetClassLevel;
-    if (targetSubjects) announcement.targetSubjects = targetSubjects;
-    if (targetCourses) announcement.targetCourses = targetCourses as any;
+      updates.allowComments = allowCommentsRaw !== "false";
+    if (targetType) updates.targetType = targetType as any;
+    if (targetClassLevel) updates.targetClassLevel = targetClassLevel;
+    if (targetSubjects) updates.targetSubjects = targetSubjects;
+    if (targetCourses) updates.targetCourses = targetCourses;
+
+    // Work on a copy of the current attachments
+    let attachments: Attachment[] = [...announcement.attachments];
 
     // ── Remove specific attachments ──────────────────────────────────────────
     if (removeAttachments.length > 0) {
-      const toDelete = announcement.attachments.filter((a) =>
+      const toDelete = attachments.filter((a) =>
         removeAttachments.includes(a.publicId),
       );
       await deleteManyFromCloudinary(toDelete);
-      announcement.attachments = announcement.attachments.filter(
+      attachments = attachments.filter(
         (a) => !removeAttachments.includes(a.publicId),
       );
     }
 
     // ── Upload new files ─────────────────────────────────────────────────────
     if (files.length > 0) {
-      const remaining = 5 - announcement.attachments.length;
+      const remaining = 5 - attachments.length;
       if (remaining <= 0) {
         return NextResponse.json(
           {
@@ -184,18 +205,29 @@ export async function PATCH(
           filesToUpload,
           `announcements/${auth.userId}`,
         );
-      announcement.attachments.push(...newAttachments);
+      attachments.push(...newAttachments);
       if (errors.length > 0) console.warn("[UPLOAD ERRORS]", errors);
     }
 
-    await announcement.save();
-    await announcement.populate("instructor", "name email avatar");
+    updates.attachments = attachments;
+
+    await db
+      .update(announcements)
+      .set(updates)
+      .where(eq(announcements.id, announcement.id));
+
+    const [withInstructor] = await db
+      .select(announcementSelect)
+      .from(announcements)
+      .innerJoin(users, eq(announcements.instructorId, users.id))
+      .where(eq(announcements.id, announcement.id))
+      .limit(1);
 
     return NextResponse.json(
       {
         success: true,
         message: "Announcement updated.",
-        data: announcement.toObject(),
+        data: toLegacy(withInstructor),
       },
       { status: 200 },
     );
@@ -209,7 +241,6 @@ export async function PATCH(
 }
 
 // ─── DELETE /api/announcement/[id] ───────────────────────────────────────────
-// Deletes announcement + all its comments + all Cloudinary assets
 export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -223,12 +254,18 @@ export async function DELETE(
       );
 
     const { id } = await params;
-    await connectDB();
 
-    const announcement = await Announcement.findOne({
-      _id: id,
-      instructor: auth.userId,
-    });
+    const [announcement] = await db
+      .select()
+      .from(announcements)
+      .where(
+        and(
+          eq(announcements.id, id),
+          eq(announcements.instructorId, auth.userId),
+        ),
+      )
+      .limit(1);
+
     if (!announcement) {
       return NextResponse.json(
         { success: false, message: "Announcement not found." },
@@ -236,24 +273,28 @@ export async function DELETE(
       );
     }
 
-    // Delete Cloudinary assets
+    // Delete Cloudinary assets for the announcement
     if (announcement.attachments.length > 0) {
       await deleteManyFromCloudinary(announcement.attachments);
     }
 
-    // Delete all comments (and their attachments)
-    const comments = await AnnouncementComment.find({ announcement: id })
-      .select("attachments")
-      .lean();
-    const commentAttachments = comments.flatMap(
-      (c: any) => c.attachments ?? [],
-    );
+    // Delete comment attachments
+    const comments = await db
+      .select({ attachments: announcementComments.attachments })
+      .from(announcementComments)
+      .where(eq(announcementComments.announcementId, id));
+
+    const commentAttachments = comments.flatMap((c) => c.attachments ?? []);
     if (commentAttachments.length > 0) {
       await deleteManyFromCloudinary(commentAttachments);
     }
 
-    await AnnouncementComment.deleteMany({ announcement: id });
-    await Announcement.deleteOne({ _id: id });
+    // Comments are removed automatically via ON DELETE CASCADE, but we delete
+    // explicitly to be safe if the FK constraint is ever relaxed.
+    await db
+      .delete(announcementComments)
+      .where(eq(announcementComments.announcementId, id));
+    await db.delete(announcements).where(eq(announcements.id, id));
 
     return NextResponse.json(
       { success: true, message: "Announcement deleted successfully." },

@@ -1,8 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { assignments, submissions, users } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Assignment from "@/models/Assignment";
-import Submission from "@/models/Submission";
+import { toLegacy } from "@/lib/serialize";
 
 function requireInstructor(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
@@ -13,12 +14,6 @@ function requireInstructor(req: NextRequest) {
 }
 
 // ─── PATCH /api/submission/[id]/grade ─────────────────────────────────────────
-// Grades or returns a student submission.
-//
-// Body (JSON):
-//   score    – number | null  (required when status === "graded")
-//   feedback – string         (optional)
-//   status   – "graded" | "returned"
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -33,10 +28,13 @@ export async function PATCH(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    // Fetch the submission and populate the assignment to verify ownership
-    const submission = await Submission.findById(id);
+    const [submission] = await db
+      .select()
+      .from(submissions)
+      .where(eq(submissions.id, id))
+      .limit(1);
+
     if (!submission) {
       return NextResponse.json(
         { success: false, message: "Submission not found." },
@@ -45,10 +43,16 @@ export async function PATCH(
     }
 
     // Verify the assignment belongs to this instructor
-    const assignment = await Assignment.findOne({
-      _id: submission.assignment,
-      instructor: auth.userId,
-    }).select("_id totalMarks");
+    const [assignment] = await db
+      .select({ id: assignments.id, totalMarks: assignments.totalMarks })
+      .from(assignments)
+      .where(
+        and(
+          eq(assignments.id, submission.assignmentId),
+          eq(assignments.instructorId, auth.userId),
+        ),
+      )
+      .limit(1);
 
     if (!assignment) {
       return NextResponse.json(
@@ -70,13 +74,15 @@ export async function PATCH(
       );
     }
 
+    const updates: Partial<typeof submissions.$inferInsert> = {
+      status,
+      feedback: typeof feedback === "string" ? feedback.trim() : null,
+    };
+
     if (status === "graded") {
       if (score === null || score === undefined || isNaN(Number(score))) {
         return NextResponse.json(
-          {
-            success: false,
-            message: "A valid score is required when grading.",
-          },
+          { success: false, message: "A valid score is required when grading." },
           { status: 400 },
         );
       }
@@ -90,18 +96,37 @@ export async function PATCH(
           { status: 400 },
         );
       }
-      submission.score = numScore;
+      updates.score = numScore;
     } else {
-      // Returning for revision — clear score
-      submission.score = null;
+      updates.score = null;
     }
 
-    submission.status = status;
-    submission.feedback = typeof feedback === "string" ? feedback.trim() : null;
-    await submission.save();
+    await db.update(submissions).set(updates).where(eq(submissions.id, id));
 
-    // Re-populate student for the response
-    await submission.populate("student", "name email avatar");
+    // Re-fetch with the student joined for the response
+    const [graded] = await db
+      .select({
+        id: submissions.id,
+        assignmentId: submissions.assignmentId,
+        submittedAt: submissions.submittedAt,
+        fileUrl: submissions.fileUrl,
+        fileName: submissions.fileName,
+        fileSize: submissions.fileSize,
+        note: submissions.note,
+        status: submissions.status,
+        score: submissions.score,
+        feedback: submissions.feedback,
+        isLate: submissions.isLate,
+        student: {
+          id: users.id,
+          name: users.name,
+          email: users.email,
+        },
+      })
+      .from(submissions)
+      .innerJoin(users, eq(submissions.studentId, users.id))
+      .where(eq(submissions.id, id))
+      .limit(1);
 
     return NextResponse.json(
       {
@@ -110,20 +135,7 @@ export async function PATCH(
           status === "graded"
             ? "Submission graded successfully."
             : "Submission returned for revision.",
-        data: {
-          _id: submission._id,
-          assignment: submission.assignment,
-          student: submission.student,
-          submittedAt: submission.submittedAt,
-          fileUrl: submission.fileUrl,
-          fileName: submission.fileName,
-          fileSize: submission.fileSize,
-          note: submission.note,
-          status: submission.status,
-          score: submission.score,
-          feedback: submission.feedback,
-          isLate: submission.isLate,
-        },
+        data: toLegacy(graded),
       },
       { status: 200 },
     );

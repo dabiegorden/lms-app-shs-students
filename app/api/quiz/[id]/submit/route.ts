@@ -1,19 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, eq, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { quizzes, quizSubmissions } from "@/src/schema";
+import type { AnswerEntry } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Quiz from "@/models/Quiz";
-import QuizSubmission from "@/models/Quizsubmission";
 
 // ─── POST /api/quiz/[id]/submit ────────────────────────────────────────────────
-// Body: JSON
-//   answers: [
-//     { questionId: string, selectedOption?: "A"|"B"|"C"|"D"|"E", theoryAnswer?: string }
-//   ]
-//   startedAt?: ISO string  (when the student opened the quiz)
-//   timeTakenSeconds?: number
-//
-// Returns the submission with MCQ results immediately. Theory answers stay
-// in "pending" state until the instructor grades them.
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -35,10 +27,14 @@ export async function POST(
     }
 
     const { id } = await params;
-    await connectDB();
 
     // ── Load quiz ──────────────────────────────────────────────────────────
-    const quiz = await Quiz.findOne({ _id: id, status: "published" });
+    const [quiz] = await db
+      .select()
+      .from(quizzes)
+      .where(and(eq(quizzes.id, id), eq(quizzes.status, "published")))
+      .limit(1);
+
     if (!quiz) {
       return NextResponse.json(
         { success: false, message: "Quiz not found or not published." },
@@ -48,7 +44,7 @@ export async function POST(
 
     // ── Check due date / late submission ───────────────────────────────────
     const now = new Date();
-    if (now > quiz.dueDate && !quiz.allowLateSubmission) {
+    if (now > new Date(quiz.dueDate) && !quiz.allowLateSubmission) {
       return NextResponse.json(
         { success: false, message: "The submission deadline has passed." },
         { status: 400 },
@@ -56,10 +52,17 @@ export async function POST(
     }
 
     // ── Prevent duplicate submission ───────────────────────────────────────
-    const existing = await QuizSubmission.findOne({
-      quiz: id,
-      student: authUser.userId,
-    });
+    const [existing] = await db
+      .select({ id: quizSubmissions.id })
+      .from(quizSubmissions)
+      .where(
+        and(
+          eq(quizSubmissions.quizId, id),
+          eq(quizSubmissions.studentId, authUser.userId),
+        ),
+      )
+      .limit(1);
+
     if (existing) {
       return NextResponse.json(
         { success: false, message: "You have already submitted this quiz." },
@@ -70,16 +73,13 @@ export async function POST(
     const body = await req.json();
     const { answers = [], startedAt = null, timeTakenSeconds = null } = body;
 
-    // ── Build a lookup map: questionId → question ──────────────────────────
-    const questionMap = new Map(quiz.questions.map((q) => [String(q._id), q]));
-
     // ── Process each answer ────────────────────────────────────────────────
     let mcqScore = 0;
     const hasTheory = quiz.questions.some((q) => q.type === "theory");
 
-    const processedAnswers = quiz.questions.map((question) => {
+    const processedAnswers: AnswerEntry[] = quiz.questions.map((question) => {
       const studentAnswer = answers.find(
-        (a: any) => String(a.questionId) === String(question._id),
+        (a: any) => String(a.questionId) === String(question.id),
       );
 
       if (question.type === "mcq") {
@@ -90,8 +90,8 @@ export async function POST(
         mcqScore += autoMark;
 
         return {
-          questionId: question._id,
-          questionType: "mcq" as const,
+          questionId: question.id,
+          questionType: "mcq",
           selectedOption: selected,
           isCorrect,
           theoryAnswer: "",
@@ -100,48 +100,48 @@ export async function POST(
           maxMarks: question.marks,
           instructorFeedback: "",
         };
-      } else {
-        // Theory
-        return {
-          questionId: question._id,
-          questionType: "theory" as const,
-          selectedOption: null,
-          isCorrect: null,
-          theoryAnswer: studentAnswer?.theoryAnswer?.trim() ?? "",
-          autoMark: null,
-          instructorMark: null,
-          maxMarks: question.marks,
-          instructorFeedback: "",
-        };
       }
+      return {
+        questionId: question.id,
+        questionType: "theory",
+        selectedOption: null,
+        isCorrect: null,
+        theoryAnswer: studentAnswer?.theoryAnswer?.trim() ?? "",
+        autoMark: null,
+        instructorMark: null,
+        maxMarks: question.marks,
+        instructorFeedback: "",
+      };
     });
 
     // ── Determine grading status ───────────────────────────────────────────
-    // If there are no theory questions, the quiz is fully auto-graded
     const gradingStatus = hasTheory ? "pending" : "graded";
-    const totalScore = hasTheory ? mcqScore : mcqScore; // theory score is 0 until graded
+    const totalScore = mcqScore; // theory score is 0 until graded
 
-    // ── Save submission ────────────────────────────────────────────────────
-    const submission = await QuizSubmission.create({
-      quiz: id,
-      student: authUser.userId,
-      answers: processedAnswers,
-      mcqScore,
-      theoryScore: 0,
-      totalScore,
-      maxPossibleScore: quiz.totalMarks,
-      submittedAt: now,
-      gradingStatus,
-      gradedAt: hasTheory ? null : now,
-      gradedBy: hasTheory ? null : null,
-      resultReleased: !hasTheory, // auto-release if MCQ only
-      startedAt: startedAt ? new Date(startedAt) : null,
-      timeTakenSeconds: timeTakenSeconds ?? null,
-    });
+    const [submission] = await db
+      .insert(quizSubmissions)
+      .values({
+        quizId: id,
+        studentId: authUser.userId,
+        answers: processedAnswers,
+        mcqScore,
+        theoryScore: 0,
+        totalScore,
+        maxPossibleScore: quiz.totalMarks,
+        submittedAt: now,
+        gradingStatus,
+        gradedAt: hasTheory ? null : now,
+        gradedBy: null,
+        resultReleased: !hasTheory,
+        startedAt: startedAt ? new Date(startedAt) : null,
+        timeTakenSeconds: timeTakenSeconds ?? null,
+      })
+      .returning();
 
     // ── Increment quiz submissionsCount (fire-and-forget) ──────────────────
-    Quiz.findByIdAndUpdate(id, { $inc: { submissionsCount: 1 } })
-      .exec()
+    db.update(quizzes)
+      .set({ submissionsCount: sql`${quizzes.submissionsCount} + 1` })
+      .where(eq(quizzes.id, id))
       .catch(() => {});
 
     // ── Build student-safe response (no correct answers / model answers) ───
@@ -162,7 +162,8 @@ export async function POST(
           ? "Quiz submitted! Your MCQ answers have been marked. Theory answers are awaiting instructor review."
           : "Quiz submitted and marked successfully!",
         data: {
-          _id: submission._id,
+          _id: submission.id,
+          id: submission.id,
           mcqScore,
           totalScore,
           maxPossibleScore: quiz.totalMarks,

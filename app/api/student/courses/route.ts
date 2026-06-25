@@ -1,8 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { courses } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Course from "@/models/Course";
-import CourseEnrollment from "@/models/Courseenrollment";
+import { toLegacyList } from "@/lib/serialize";
 
 function requireStudent(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
@@ -13,8 +14,6 @@ function requireStudent(req: NextRequest) {
 }
 
 // ─── GET /api/student/courses ─────────────────────────────────────────────────
-// Returns published courses visible to the student.
-// Query: search, subject, classLevel, page, limit
 export async function GET(req: NextRequest) {
   try {
     const auth = requireStudent(req);
@@ -25,8 +24,6 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    await connectDB();
-
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search")?.trim() ?? "";
     const subject = searchParams.get("subject")?.trim() ?? "";
@@ -36,37 +33,65 @@ export async function GET(req: NextRequest) {
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "12", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    // Only published courses — classLevel "All" matches everyone
-    const query: Record<string, any> = {
-      status: "published",
-      $or: [{ classLevel: "All" }, ...(classLevel ? [{ classLevel }] : [])],
-    };
+    const conditions = [eq(courses.status, "published")];
 
-    if (search) query.$text = { $search: search };
-    if (subject) query.subject = { $regex: subject, $options: "i" };
+    // classLevel "All" matches everyone; otherwise also match the requested level
+    if (classLevel) {
+      conditions.push(
+        or(
+          eq(courses.classLevel, "All"),
+          eq(courses.classLevel, classLevel as any),
+        )!,
+      );
+    }
+    if (search) {
+      conditions.push(
+        or(
+          ilike(courses.title, `%${search}%`),
+          ilike(courses.subject, `%${search}%`),
+          ilike(courses.topic, `%${search}%`),
+          ilike(courses.description, `%${search}%`),
+        )!,
+      );
+    }
+    if (subject) conditions.push(ilike(courses.subject, `%${subject}%`));
 
-    const [courses, total] = await Promise.all([
-      Course.find(query)
-        .sort({ enrollmentsCount: -1, createdAt: -1 })
-        .skip(skip)
+    const whereClause = and(...conditions);
+
+    const [fullRows, totalResult] = await Promise.all([
+      db
+        .select()
+        .from(courses)
+        .where(whereClause)
+        .orderBy(desc(courses.enrollmentsCount), desc(courses.createdAt))
         .limit(limit)
-        .select("-sections -thumbnailPath -overview -instructor")
-        .lean(),
-      Course.countDocuments(query),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(courses)
+        .where(whereClause),
     ]);
 
+    const rows = fullRows.map(
+      ({ sections, overview, thumbnailPath, instructorId, ...rest }) => rest,
+    );
+    const total = totalResult[0]?.count ?? 0;
+
     // Increment views (fire-and-forget)
-    const ids = courses.map((c: any) => c._id);
-    Course.updateMany({ _id: { $in: ids } }, { $inc: { views: 1 } })
-      .exec()
-      .catch(() => {});
+    const ids = fullRows.map((c) => c.id);
+    if (ids.length > 0) {
+      db.update(courses)
+        .set({ views: sql`${courses.views} + 1` })
+        .where(inArray(courses.id, ids))
+        .catch(() => {});
+    }
 
     return NextResponse.json(
       {
         success: true,
-        data: courses,
+        data: toLegacyList(rows),
         pagination: {
           total,
           page,

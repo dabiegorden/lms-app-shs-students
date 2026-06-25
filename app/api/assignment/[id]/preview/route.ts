@@ -1,13 +1,12 @@
 import { type NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
-import { connectDB } from "@/lib/db";
+import { and, eq, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { assignments } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Assignment from "@/models/Assignment";
 
 // ─── GET /api/assignment/[id]/preview ─────────────────────────────────────────
-// Streams the attached PDF from disk with Content-Disposition: inline so the
-// browser renders it natively inside the iframe (no sandbox, no Google Docs).
-// Also increments the view counter (fire-and-forget).
+// Streams the attached PDF from disk inline; increments the view counter.
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -20,17 +19,26 @@ export async function GET(
     if (!authUser) return new NextResponse("Unauthorized", { status: 401 });
 
     const { id } = await params;
-    await connectDB();
 
     // Instructors only preview their own; students can preview any published one
-    const query =
+    const whereClause =
       authUser.role === "instructor"
-        ? { _id: id, instructor: authUser.userId }
-        : { _id: id, status: "published" };
+        ? and(
+            eq(assignments.id, id),
+            eq(assignments.instructorId, authUser.userId),
+          )
+        : and(eq(assignments.id, id), eq(assignments.status, "published"));
 
-    const assignment = await Assignment.findOne(query).select(
-      "filePath fileName fileSize views",
-    );
+    const [assignment] = await db
+      .select({
+        filePath: assignments.filePath,
+        fileName: assignments.fileName,
+        fileSize: assignments.fileSize,
+        views: assignments.views,
+      })
+      .from(assignments)
+      .where(whereClause)
+      .limit(1);
 
     if (!assignment) {
       return new NextResponse("Assignment not found", { status: 404 });
@@ -41,7 +49,6 @@ export async function GET(
       });
     }
 
-    // ── Read file from disk ──────────────────────────────────────────────────
     let fileBuffer: Buffer;
     try {
       fileBuffer = await fs.readFile(assignment.filePath);
@@ -54,12 +61,12 @@ export async function GET(
       throw err;
     }
 
-    // ── Increment view count (fire-and-forget) ───────────────────────────────
-    Assignment.findByIdAndUpdate(id, { $inc: { views: 1 } })
-      .exec()
+    // Increment view count (fire-and-forget)
+    db.update(assignments)
+      .set({ views: sql`${assignments.views} + 1` })
+      .where(eq(assignments.id, id))
       .catch(() => {});
 
-    // ── Return inline — NO sandbox on the consuming iframe ───────────────────
     return new NextResponse(new Uint8Array(fileBuffer), {
       status: 200,
       headers: {

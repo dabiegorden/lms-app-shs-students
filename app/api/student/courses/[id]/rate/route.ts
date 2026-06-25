@@ -1,10 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, eq, isNotNull, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { courses, courseEnrollments } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Course from "@/models/Course";
-import CourseEnrollment from "@/models/Courseenrollment";
-
-// ─── FILE: /api/student/courses/[id]/rate/route.ts ───────────────────────────
+import { isUuid } from "@/lib/validation";
+import { toLegacy } from "@/lib/serialize";
 
 function requireStudent(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
@@ -31,8 +31,7 @@ export async function POST(
 
     const { id } = await params;
 
-    // Guard: reject obviously invalid IDs before hitting MongoDB
-    if (!id || id === "undefined" || !id.match(/^[a-f\d]{24}$/i)) {
+    if (!isUuid(id)) {
       return NextResponse.json(
         { success: false, message: "Invalid course ID." },
         { status: 400 },
@@ -47,12 +46,16 @@ export async function POST(
       );
     }
 
-    await connectDB();
-
-    const enrollment = await CourseEnrollment.findOne({
-      course: id,
-      student: auth.userId,
-    });
+    const [enrollment] = await db
+      .select()
+      .from(courseEnrollments)
+      .where(
+        and(
+          eq(courseEnrollments.courseId, id),
+          eq(courseEnrollments.studentId, auth.userId),
+        ),
+      )
+      .limit(1);
 
     if (!enrollment) {
       return NextResponse.json(
@@ -71,36 +74,43 @@ export async function POST(
       );
     }
 
-    enrollment.rating = rating;
-    enrollment.review = review.trim();
-    enrollment.reviewedAt = new Date();
-    await enrollment.save();
+    const [updated] = await db
+      .update(courseEnrollments)
+      .set({
+        rating,
+        review: review.trim(),
+        reviewedAt: new Date(),
+      })
+      .where(eq(courseEnrollments.id, enrollment.id))
+      .returning();
 
     // Recompute course average rating (fire-and-forget)
-    CourseEnrollment.aggregate([
-      { $match: { course: enrollment.course, rating: { $ne: null } } },
-      {
-        $group: {
-          _id: null,
-          avg: { $avg: "$rating" },
-          count: { $sum: 1 },
-        },
-      },
-    ])
-      .then(([result]: any) => {
-        if (result) {
-          Course.findByIdAndUpdate(id, {
-            ratingsAverage: Math.round(result.avg * 10) / 10,
-            ratingsCount: result.count,
-          })
-            .exec()
-            .catch(() => {});
+    db.select({
+      avg: sql<number>`avg(${courseEnrollments.rating})`,
+      count: sql<number>`count(*)::int`,
+    })
+      .from(courseEnrollments)
+      .where(
+        and(
+          eq(courseEnrollments.courseId, id),
+          isNotNull(courseEnrollments.rating),
+        ),
+      )
+      .then(([result]) => {
+        if (result && result.count > 0) {
+          return db
+            .update(courses)
+            .set({
+              ratingsAverage: Math.round((result.avg ?? 0) * 10) / 10,
+              ratingsCount: result.count,
+            })
+            .where(eq(courses.id, id));
         }
       })
       .catch(() => {});
 
     return NextResponse.json(
-      { success: true, message: "Rating submitted.", data: enrollment },
+      { success: true, message: "Rating submitted.", data: toLegacy(updated) },
       { status: 200 },
     );
   } catch (error: any) {

@@ -1,7 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, asc, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { announcements, users } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Announcement from "@/models/Announcement";
+import { toLegacy, toLegacyList } from "@/lib/serialize";
 import { uploadManyToCloudinary, ALLOWED_TYPES } from "@/lib/Cloudinaryupload";
 
 // ─── Auth helpers ─────────────────────────────────────────────────────────────
@@ -13,22 +15,40 @@ function requireInstructor(req: NextRequest) {
   return user;
 }
 
-// Any authenticated user (instructor OR student) can read announcements
 function requireAuth(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
   return verifyToken(token);
 }
 
+// Columns + the joined instructor object (mirrors the old populate)
+const announcementSelect = {
+  id: announcements.id,
+  title: announcements.title,
+  body: announcements.body,
+  attachments: announcements.attachments,
+  targetType: announcements.targetType,
+  targetClassLevel: announcements.targetClassLevel,
+  targetSubjects: announcements.targetSubjects,
+  targetCourses: announcements.targetCourses,
+  isPinned: announcements.isPinned,
+  allowComments: announcements.allowComments,
+  status: announcements.status,
+  publishedAt: announcements.publishedAt,
+  viewsCount: announcements.viewsCount,
+  commentsCount: announcements.commentsCount,
+  likesCount: announcements.likesCount,
+  createdAt: announcements.createdAt,
+  updatedAt: announcements.updatedAt,
+  instructor: {
+    id: users.id,
+    name: users.name,
+    email: users.email,
+    profilePicture: users.profilePicture,
+  },
+} as const;
+
 // ─── GET /api/announcement ─────────────────────────────────────────────────────
-// Query params:
-//   search      – free-text (title / body)
-//   status      – "draft" | "published"
-//   targetType  – "all" | "class" | "subject" | "course"
-//   isPinned    – "true" | "false"
-//   page        – default 1
-//   limit       – default 15, max 50
-//   sort        – "newest" | "oldest" | "pinned"
 export async function GET(req: NextRequest) {
   try {
     const auth = requireAuth(req);
@@ -38,8 +58,6 @@ export async function GET(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search")?.trim() ?? "";
@@ -52,42 +70,58 @@ export async function GET(req: NextRequest) {
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "15", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
     // Instructors only see their own; students see all published ones
-    const query: Record<string, any> =
+    const conditions =
       auth.role === "instructor"
-        ? { instructor: auth.userId }
-        : { status: "published" };
+        ? [eq(announcements.instructorId, auth.userId)]
+        : [eq(announcements.status, "published")];
 
-    if (search) query.$text = { $search: search };
-    if (status && auth.role === "instructor") query.status = status;
-    if (targetType) query.targetType = targetType;
-    if (isPinned === "true") query.isPinned = true;
-    if (isPinned === "false") query.isPinned = false;
+    if (search) {
+      conditions.push(
+        or(
+          ilike(announcements.title, `%${search}%`),
+          ilike(announcements.body, `%${search}%`),
+        )!,
+      );
+    }
+    if (status && auth.role === "instructor")
+      conditions.push(eq(announcements.status, status as any));
+    if (targetType) conditions.push(eq(announcements.targetType, targetType as any));
+    if (isPinned === "true") conditions.push(eq(announcements.isPinned, true));
+    if (isPinned === "false") conditions.push(eq(announcements.isPinned, false));
 
-    const sortMap: Record<string, Record<string, 1 | -1>> = {
-      newest: { isPinned: -1, createdAt: -1 },
-      oldest: { isPinned: -1, createdAt: 1 },
-      pinned: { isPinned: -1, createdAt: -1 },
-      popular: { commentsCount: -1, createdAt: -1 },
-    };
-    const sortOption = sortMap[sort] ?? sortMap.newest;
+    const whereClause = and(...conditions);
 
-    const [announcements, total] = await Promise.all([
-      Announcement.find(query)
-        .sort(sortOption)
-        .skip(skip)
+    const orderBy =
+      sort === "oldest"
+        ? [desc(announcements.isPinned), asc(announcements.createdAt)]
+        : sort === "popular"
+          ? [desc(announcements.commentsCount), desc(announcements.createdAt)]
+          : [desc(announcements.isPinned), desc(announcements.createdAt)];
+
+    const [rows, totalResult] = await Promise.all([
+      db
+        .select(announcementSelect)
+        .from(announcements)
+        .innerJoin(users, eq(announcements.instructorId, users.id))
+        .where(whereClause)
+        .orderBy(...orderBy)
         .limit(limit)
-        .populate("instructor", "name email avatar")
-        .lean(),
-      Announcement.countDocuments(query),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(announcements)
+        .where(whereClause),
     ]);
+
+    const total = totalResult[0]?.count ?? 0;
 
     return NextResponse.json(
       {
         success: true,
-        data: announcements,
+        data: toLegacyList(rows),
         pagination: {
           total,
           page,
@@ -109,17 +143,6 @@ export async function GET(req: NextRequest) {
 }
 
 // ─── POST /api/announcement ────────────────────────────────────────────────────
-// Body: multipart/form-data
-//   title             (required)
-//   body              (required)
-//   status            (optional, default "published")
-//   isPinned          (optional, "true"|"false")
-//   allowComments     (optional, "true"|"false", default "true")
-//   targetType        (optional, default "all")
-//   targetClassLevel  (optional, JSON array string)
-//   targetSubjects    (optional, JSON array string)
-//   targetCourses     (optional, JSON array string of IDs)
-//   files             (optional, up to 5 files, 25MB each)
 export async function POST(req: NextRequest) {
   try {
     const auth = requireInstructor(req);
@@ -129,8 +152,6 @@ export async function POST(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const formData = await req.formData();
 
@@ -157,7 +178,6 @@ export async function POST(req: NextRequest) {
     const targetCourses = safeParseArray(formData.get("targetCourses"));
     const files = formData.getAll("files") as File[];
 
-    // ── Validate ────────────────────────────────────────────────────────────
     if (!title) {
       return NextResponse.json(
         { success: false, message: "Title is required." },
@@ -171,7 +191,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Validate file types before uploading
     const validFiles = files.filter((f) => f.size > 0);
     for (const file of validFiles) {
       if (!ALLOWED_TYPES.includes(file.type)) {
@@ -185,7 +204,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Upload attachments to Cloudinary ─────────────────────────────────────
     let attachments: any[] = [];
     if (validFiles.length > 0) {
       const { attachments: uploaded, errors } = await uploadManyToCloudinary(
@@ -193,34 +211,40 @@ export async function POST(req: NextRequest) {
         `announcements/${auth.userId}`,
       );
       attachments = uploaded;
-      if (errors.length > 0) {
-        console.warn("[UPLOAD PARTIAL ERRORS]", errors);
-      }
+      if (errors.length > 0) console.warn("[UPLOAD PARTIAL ERRORS]", errors);
     }
 
-    // ── Save to DB ────────────────────────────────────────────────────────────
-    const announcement = await Announcement.create({
-      title,
-      body,
-      attachments,
-      instructor: auth.userId,
-      status,
-      isPinned,
-      allowComments,
-      targetType,
-      targetClassLevel,
-      targetSubjects,
-      targetCourses,
-    });
+    const [created] = await db
+      .insert(announcements)
+      .values({
+        title,
+        body,
+        attachments,
+        instructorId: auth.userId,
+        status: status as any,
+        isPinned,
+        allowComments,
+        targetType: targetType as any,
+        targetClassLevel,
+        targetSubjects,
+        targetCourses,
+        publishedAt: status === "published" ? new Date() : null,
+      })
+      .returning();
 
-    // Populate instructor for response
-    await announcement.populate("instructor", "name email avatar");
+    // Re-fetch with instructor joined for the response
+    const [withInstructor] = await db
+      .select(announcementSelect)
+      .from(announcements)
+      .innerJoin(users, eq(announcements.instructorId, users.id))
+      .where(eq(announcements.id, created.id))
+      .limit(1);
 
     return NextResponse.json(
       {
         success: true,
         message: "Announcement posted successfully.",
-        data: announcement.toObject(),
+        data: toLegacy(withInstructor),
       },
       { status: 201 },
     );
@@ -232,3 +256,5 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+export { announcementSelect };

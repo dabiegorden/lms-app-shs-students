@@ -1,9 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { quizzes } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Quiz from "@/models/Quiz";
+import { toLegacyList } from "@/lib/serialize";
+import { quizListProjection } from "@/lib/quiz-utils";
 
-// ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireStudent(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
@@ -13,8 +15,6 @@ function requireStudent(req: NextRequest) {
 }
 
 // ─── GET /api/student/quizzes ──────────────────────────────────────────────────
-// Returns all published quizzes visible to the student.
-// Query: search, subject, classLevel, page, limit
 export async function GET(req: NextRequest) {
   try {
     const auth = requireStudent(req);
@@ -25,8 +25,6 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    await connectDB();
-
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search")?.trim() ?? "";
     const subject = searchParams.get("subject")?.trim() ?? "";
@@ -36,44 +34,60 @@ export async function GET(req: NextRequest) {
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "20", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    // Only published quizzes — classLevel "All" matches everyone
-    const query: Record<string, any> = {
-      status: "published",
-      $or: [{ classLevel: "All" }, ...(classLevel ? [{ classLevel }] : [])],
-    };
+    const conditions = [eq(quizzes.status, "published")];
+    if (classLevel) {
+      conditions.push(
+        or(
+          eq(quizzes.classLevel, "All"),
+          eq(quizzes.classLevel, classLevel as any),
+        )!,
+      );
+    }
+    if (search) {
+      conditions.push(
+        or(
+          ilike(quizzes.title, `%${search}%`),
+          ilike(quizzes.subject, `%${search}%`),
+          ilike(quizzes.topic, `%${search}%`),
+          ilike(quizzes.description, `%${search}%`),
+        )!,
+      );
+    }
+    if (subject) conditions.push(ilike(quizzes.subject, `%${subject}%`));
 
-    if (search) query.$text = { $search: search };
-    if (subject) query.subject = { $regex: subject, $options: "i" };
+    const whereClause = and(...conditions);
 
-    const [quizzes, total] = await Promise.all([
-      Quiz.find(query)
-        .sort({ dueDate: 1, createdAt: -1 })
-        .skip(skip)
+    const [rows, totalResult] = await Promise.all([
+      db
+        .select()
+        .from(quizzes)
+        .where(whereClause)
+        .orderBy(asc(quizzes.dueDate), desc(quizzes.createdAt))
         .limit(limit)
-        // Strip correctOption and modelAnswer from student view
-        .select(
-          "_id title description subject topic classLevel dueDate totalMarks durationMinutes allowLateSubmission shuffleQuestions status views submissionsCount createdAt questions._id questions.type questions.text questions.marks questions.options questions.order",
-        )
-        .lean(),
-      Quiz.countDocuments(query),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(quizzes)
+        .where(whereClause),
     ]);
 
     // Increment views (fire-and-forget)
-    const ids = quizzes.map((q: any) => q._id);
-    Quiz.updateMany({ _id: { $in: ids } }, { $inc: { views: 1 } })
-      .exec()
-      .catch(() => {});
+    const ids = rows.map((q) => q.id);
+    if (ids.length > 0) {
+      db.update(quizzes)
+        .set({ views: sql`${quizzes.views} + 1` })
+        .where(inArray(quizzes.id, ids))
+        .catch(() => {});
+    }
 
-    const data = quizzes.map((q: any) => ({
-      ...q,
-      questionCount: q.questions?.length ?? 0,
-      mcqCount: q.questions?.filter((qu: any) => qu.type === "mcq").length ?? 0,
-      theoryCount:
-        q.questions?.filter((qu: any) => qu.type === "theory").length ?? 0,
-      questions: undefined, // Strip questions from list view; fetched individually
-    }));
+    // Strip instructor + answer-bearing fields from the student list view
+    const data = toLegacyList(
+      rows.map(({ instructorId, ...rest }) => rest),
+    ).map((q) => quizListProjection(q));
+
+    const total = totalResult[0]?.count ?? 0;
 
     return NextResponse.json(
       {

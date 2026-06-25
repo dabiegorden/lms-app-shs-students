@@ -1,30 +1,20 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, asc, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { assignments } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Assignment from "@/models/Assignment";
+import { toLegacyList } from "@/lib/serialize";
 
-// ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireStudent(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
   const user = verifyToken(token);
-  // Accept both "student" role and any authenticated user who isn't blocked
   if (!user) return null;
   return user;
 }
 
 // ─── GET /api/students/assignment ─────────────────────────────────────────────
-// Returns PUBLISHED assignments only (students never see drafts/closed unless
-// they already submitted to a now-closed one — handled client-side).
-//
-// Query params:
-//   search     – free-text search
-//   subject    – exact subject filter
-//   classLevel – "SHS 1" | "SHS 2" | "SHS 3" | "All"
-//   status     – locked to "published" (ignored from client, always overridden)
-//   page       – default 1
-//   limit      – default 12, max 50
-//   sort       – "newest" | "oldest" | "title" | "dueDate"
+// Returns PUBLISHED assignments only.
 export async function GET(req: NextRequest) {
   try {
     const auth = requireStudent(req);
@@ -34,8 +24,6 @@ export async function GET(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search")?.trim() ?? "";
@@ -47,40 +35,56 @@ export async function GET(req: NextRequest) {
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "12", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    // ── Query — students always see only published assignments ─────────────
-    const query: Record<string, any> = { status: "published" };
+    const conditions = [eq(assignments.status, "published")];
+    if (search) {
+      conditions.push(
+        or(
+          ilike(assignments.title, `%${search}%`),
+          ilike(assignments.subject, `%${search}%`),
+          ilike(assignments.topic, `%${search}%`),
+          ilike(assignments.instructions, `%${search}%`),
+        )!,
+      );
+    }
+    if (subject) conditions.push(ilike(assignments.subject, `%${subject}%`));
+    if (classLevel && classLevel !== "All")
+      conditions.push(eq(assignments.classLevel, classLevel as any));
 
-    if (search) query.$text = { $search: search };
-    if (subject) query.subject = { $regex: subject, $options: "i" };
-    // If classLevel is "All" or empty, show everything; otherwise filter
-    if (classLevel && classLevel !== "All") query.classLevel = classLevel;
+    const whereClause = and(...conditions);
 
-    // ── Sort ───────────────────────────────────────────────────────────────
-    const sortMap: Record<string, Record<string, 1 | -1>> = {
-      newest: { createdAt: -1 },
-      oldest: { createdAt: 1 },
-      title: { title: 1 },
-      dueDate: { dueDate: 1 },
+    const orderByMap: Record<string, any> = {
+      newest: desc(assignments.createdAt),
+      oldest: asc(assignments.createdAt),
+      title: asc(assignments.title),
+      dueDate: asc(assignments.dueDate),
     };
-    const sortOption = sortMap[sort] ?? sortMap.newest;
+    const orderBy = orderByMap[sort] ?? orderByMap.newest;
 
-    // ── Execute ────────────────────────────────────────────────────────────
-    const [assignments, total] = await Promise.all([
-      Assignment.find(query)
-        .sort(sortOption)
-        .skip(skip)
+    const [fullRows, totalResult] = await Promise.all([
+      db
+        .select()
+        .from(assignments)
+        .where(whereClause)
+        .orderBy(orderBy)
         .limit(limit)
-        .select("-filePath -instructor") // never expose server path or instructor id
-        .lean(),
-      Assignment.countDocuments(query),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(assignments)
+        .where(whereClause),
     ]);
+
+    const rows = fullRows.map(
+      ({ filePath, instructorId, ...rest }) => rest,
+    );
+    const total = totalResult[0]?.count ?? 0;
 
     return NextResponse.json(
       {
         success: true,
-        data: assignments,
+        data: toLegacyList(rows),
         pagination: {
           total,
           page,

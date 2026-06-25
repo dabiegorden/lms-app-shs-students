@@ -1,8 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, desc, eq, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { courses, courseEnrollments, users } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Course from "@/models/Course";
-import CourseEnrollment from "@/models/Courseenrollment";
+import { toLegacyList } from "@/lib/serialize";
 
 function requireInstructor(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
@@ -13,7 +14,6 @@ function requireInstructor(req: NextRequest) {
 }
 
 // ─── GET /api/course/[id]/stats ───────────────────────────────────────────────
-// Returns enrollment + completion stats for a course
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -27,35 +27,54 @@ export async function GET(
       );
 
     const { id } = await params;
-    await connectDB();
 
-    const course = await Course.findOne({
-      _id: id,
-      instructor: auth.userId,
-    }).select("_id title totalLessons enrollmentsCount");
+    const [course] = await db
+      .select({
+        id: courses.id,
+        title: courses.title,
+        totalLessons: courses.totalLessons,
+        enrollmentsCount: courses.enrollmentsCount,
+      })
+      .from(courses)
+      .where(and(eq(courses.id, id), eq(courses.instructorId, auth.userId)))
+      .limit(1);
+
     if (!course)
       return NextResponse.json(
         { success: false, message: "Course not found." },
         { status: 404 },
       );
 
-    const [totalEnrolled, totalCompleted, recentEnrollments, avgProgress] =
-      await Promise.all([
-        CourseEnrollment.countDocuments({ course: id }),
-        CourseEnrollment.countDocuments({ course: id, isCompleted: true }),
-        CourseEnrollment.find({ course: id })
-          .sort({ enrolledAt: -1 })
-          .limit(10)
-          .populate("student", "name email")
-          .select(
-            "student progressPercent isCompleted enrolledAt lastAccessedAt",
-          )
-          .lean(),
-        CourseEnrollment.aggregate([
-          { $match: { course: course._id } },
-          { $group: { _id: null, avgProgress: { $avg: "$progressPercent" } } },
-        ]),
-      ]);
+    const [aggregate, recentEnrollments] = await Promise.all([
+      db
+        .select({
+          totalEnrolled: sql<number>`count(*)::int`,
+          totalCompleted: sql<number>`count(*) filter (where ${courseEnrollments.isCompleted})::int`,
+          avgProgress: sql<number>`coalesce(avg(${courseEnrollments.progressPercent}), 0)`,
+        })
+        .from(courseEnrollments)
+        .where(eq(courseEnrollments.courseId, id)),
+      db
+        .select({
+          id: courseEnrollments.id,
+          progressPercent: courseEnrollments.progressPercent,
+          isCompleted: courseEnrollments.isCompleted,
+          enrolledAt: courseEnrollments.enrolledAt,
+          lastAccessedAt: courseEnrollments.lastAccessedAt,
+          student: {
+            id: users.id,
+            name: users.name,
+            email: users.email,
+          },
+        })
+        .from(courseEnrollments)
+        .innerJoin(users, eq(courseEnrollments.studentId, users.id))
+        .where(eq(courseEnrollments.courseId, id))
+        .orderBy(desc(courseEnrollments.enrolledAt))
+        .limit(10),
+    ]);
+
+    const { totalEnrolled, totalCompleted, avgProgress } = aggregate[0];
 
     return NextResponse.json({
       success: true,
@@ -66,8 +85,8 @@ export async function GET(
           totalEnrolled > 0
             ? Math.round((totalCompleted / totalEnrolled) * 100)
             : 0,
-        averageProgress: Math.round(avgProgress[0]?.avgProgress ?? 0),
-        recentEnrollments,
+        averageProgress: Math.round(avgProgress ?? 0),
+        recentEnrollments: toLegacyList(recentEnrollments),
       },
     });
   } catch (error: any) {

@@ -1,10 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, desc, eq, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { quizzes, quizSubmissions, users } from "@/src/schema";
+import type { AnswerEntry } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Quiz from "@/models/Quiz";
-import QuizSubmission from "@/models/Quizsubmission";
+import { toLegacy, toLegacyList } from "@/lib/serialize";
 
-// ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireInstructor(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
@@ -14,8 +15,6 @@ function requireInstructor(req: NextRequest) {
 }
 
 // ─── GET /api/quiz/[id]/submissions ───────────────────────────────────────────
-// Returns all submissions for the quiz (instructor only).
-// Query: gradingStatus filter, page, limit
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -30,13 +29,18 @@ export async function GET(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    // Confirm ownership
-    const quiz = await Quiz.findOne({
-      _id: id,
-      instructor: auth.userId,
-    }).select("_id title totalMarks questions");
+    const [quiz] = await db
+      .select({
+        id: quizzes.id,
+        title: quizzes.title,
+        totalMarks: quizzes.totalMarks,
+        questions: quizzes.questions,
+      })
+      .from(quizzes)
+      .where(and(eq(quizzes.id, id), eq(quizzes.instructorId, auth.userId)))
+      .limit(1);
+
     if (!quiz) {
       return NextResponse.json(
         { success: false, message: "Quiz not found." },
@@ -51,32 +55,64 @@ export async function GET(
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "20", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    const subQuery: Record<string, any> = { quiz: id };
-    if (gradingStatus) subQuery.gradingStatus = gradingStatus;
+    const conditions = [eq(quizSubmissions.quizId, id)];
+    if (gradingStatus)
+      conditions.push(eq(quizSubmissions.gradingStatus, gradingStatus as any));
+    const whereClause = and(...conditions);
 
-    const [submissions, total] = await Promise.all([
-      QuizSubmission.find(subQuery)
-        .sort({ submittedAt: -1 })
-        .skip(skip)
+    const [rows, totalResult] = await Promise.all([
+      db
+        .select({
+          id: quizSubmissions.id,
+          quizId: quizSubmissions.quizId,
+          answers: quizSubmissions.answers,
+          mcqScore: quizSubmissions.mcqScore,
+          theoryScore: quizSubmissions.theoryScore,
+          totalScore: quizSubmissions.totalScore,
+          maxPossibleScore: quizSubmissions.maxPossibleScore,
+          submittedAt: quizSubmissions.submittedAt,
+          gradingStatus: quizSubmissions.gradingStatus,
+          gradedAt: quizSubmissions.gradedAt,
+          overallFeedback: quizSubmissions.overallFeedback,
+          resultReleased: quizSubmissions.resultReleased,
+          startedAt: quizSubmissions.startedAt,
+          timeTakenSeconds: quizSubmissions.timeTakenSeconds,
+          createdAt: quizSubmissions.createdAt,
+          updatedAt: quizSubmissions.updatedAt,
+          student: {
+            id: users.id,
+            name: users.name,
+            email: users.email,
+          },
+        })
+        .from(quizSubmissions)
+        .innerJoin(users, eq(quizSubmissions.studentId, users.id))
+        .where(whereClause)
+        .orderBy(desc(quizSubmissions.submittedAt))
         .limit(limit)
-        .populate("student", "name email")
-        .lean(),
-      QuizSubmission.countDocuments(subQuery),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(quizSubmissions)
+        .where(whereClause),
     ]);
+
+    const total = totalResult[0]?.count ?? 0;
 
     return NextResponse.json(
       {
         success: true,
         data: {
           quiz: {
-            _id: quiz._id,
+            _id: quiz.id,
+            id: quiz.id,
             title: quiz.title,
             totalMarks: quiz.totalMarks,
-            questions: quiz.questions, // includes correctOption & modelAnswer for instructor
+            questions: quiz.questions.map((q) => ({ ...q, _id: q.id })),
           },
-          submissions,
+          submissions: toLegacyList(rows),
           pagination: {
             total,
             page,
@@ -100,13 +136,6 @@ export async function GET(
 
 // ─── PATCH /api/quiz/[id]/submissions ─────────────────────────────────────────
 // Grade one or more theory answers in a single submission.
-// Body: JSON
-//   submissionId   string (required)
-//   grades: [
-//     { questionId: string, instructorMark: number, instructorFeedback?: string }
-//   ]
-//   overallFeedback?: string
-//   releaseResult?: boolean   – set true to push result to student dashboard
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -121,13 +150,17 @@ export async function PATCH(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    // Confirm quiz ownership
-    const quiz = await Quiz.findOne({
-      _id: id,
-      instructor: auth.userId,
-    }).select("_id totalMarks questions");
+    const [quiz] = await db
+      .select({
+        id: quizzes.id,
+        totalMarks: quizzes.totalMarks,
+        questions: quizzes.questions,
+      })
+      .from(quizzes)
+      .where(and(eq(quizzes.id, id), eq(quizzes.instructorId, auth.userId)))
+      .limit(1);
+
     if (!quiz) {
       return NextResponse.json(
         { success: false, message: "Quiz not found." },
@@ -145,10 +178,17 @@ export async function PATCH(
       );
     }
 
-    const submission = await QuizSubmission.findOne({
-      _id: submissionId,
-      quiz: id,
-    });
+    const [submission] = await db
+      .select()
+      .from(quizSubmissions)
+      .where(
+        and(
+          eq(quizSubmissions.id, submissionId),
+          eq(quizSubmissions.quizId, id),
+        ),
+      )
+      .limit(1);
+
     if (!submission) {
       return NextResponse.json(
         { success: false, message: "Submission not found." },
@@ -156,24 +196,21 @@ export async function PATCH(
       );
     }
 
+    const answers: AnswerEntry[] = submission.answers.map((a) => ({ ...a }));
+
     // ── Apply per-question grades ──────────────────────────────────────────
     for (const grade of grades) {
-      const answerEntry = submission.answers.find(
+      const answerEntry = answers.find(
         (a) => String(a.questionId) === String(grade.questionId),
       );
       if (!answerEntry) continue;
 
-      // Instructors can grade both theory and override MCQ marks
       const question = quiz.questions.find(
-        (q) => String(q._id) === String(grade.questionId),
+        (q) => String(q.id) === String(grade.questionId),
       );
       const maxMarks = question?.marks ?? answerEntry.maxMarks;
 
-      // Clamp mark between 0 and maxMarks
-      const mark = Math.min(
-        maxMarks,
-        Math.max(0, Number(grade.instructorMark)),
-      );
+      const mark = Math.min(maxMarks, Math.max(0, Number(grade.instructorMark)));
       answerEntry.instructorMark = mark;
 
       if (grade.instructorFeedback !== undefined) {
@@ -185,7 +222,7 @@ export async function PATCH(
     let theoryScore = 0;
     let allTheoryGraded = true;
 
-    for (const answer of submission.answers) {
+    for (const answer of answers) {
       if (answer.questionType === "theory") {
         if (answer.instructorMark === null) {
           allTheoryGraded = false;
@@ -195,37 +232,42 @@ export async function PATCH(
       }
     }
 
-    submission.theoryScore = theoryScore;
-    submission.totalScore = submission.mcqScore + theoryScore;
+    const updates: Partial<typeof quizSubmissions.$inferInsert> = {
+      answers,
+      theoryScore,
+      totalScore: submission.mcqScore + theoryScore,
+    };
 
-    // ── Update grading status ──────────────────────────────────────────────
-    const hasAnyTheoryGraded = submission.answers.some(
+    const hasAnyTheoryGraded = answers.some(
       (a) => a.questionType === "theory" && a.instructorMark !== null,
     );
 
     if (allTheoryGraded) {
-      submission.gradingStatus = "graded";
-      submission.gradedAt = new Date();
-      submission.gradedBy = auth.userId as any;
+      updates.gradingStatus = "graded";
+      updates.gradedAt = new Date();
+      updates.gradedBy = auth.userId;
     } else if (hasAnyTheoryGraded) {
-      submission.gradingStatus = "partially_graded";
+      updates.gradingStatus = "partially_graded";
     }
 
-    // ── Optional fields ────────────────────────────────────────────────────
     if (overallFeedback !== undefined) {
-      submission.overallFeedback = overallFeedback.trim();
+      updates.overallFeedback = overallFeedback.trim();
     }
     if (releaseResult !== undefined) {
-      submission.resultReleased = Boolean(releaseResult);
+      updates.resultReleased = Boolean(releaseResult);
     }
 
-    await submission.save();
+    const [updated] = await db
+      .update(quizSubmissions)
+      .set(updates)
+      .where(eq(quizSubmissions.id, submission.id))
+      .returning();
 
     return NextResponse.json(
       {
         success: true,
         message: "Submission graded successfully.",
-        data: submission.toObject(),
+        data: toLegacy(updated),
       },
       { status: 200 },
     );

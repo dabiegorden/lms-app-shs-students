@@ -1,9 +1,19 @@
 import { type NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { connectDB } from "@/lib/db";
+import { and, asc, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { courses } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Course from "@/models/Course";
+import { toLegacy, toLegacyList } from "@/lib/serialize";
+import {
+  extractYouTubeId,
+  formatDuration,
+  generateSlug,
+} from "@/lib/course-utils";
+
+// Re-export so existing importers keep working
+export { extractYouTubeId, formatDuration };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_THUMBNAIL_SIZE = 5 * 1024 * 1024; // 5 MB
@@ -25,27 +35,10 @@ function requireInstructor(req: NextRequest) {
   return user;
 }
 
-// ─── YouTube video ID extractor ───────────────────────────────────────────────
-export function extractYouTubeId(url: string): string | null {
-  if (!url) return null;
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/)([a-zA-Z0-9_-]{11})/,
-    /^([a-zA-Z0-9_-]{11})$/, // raw ID
-  ];
-  for (const pattern of patterns) {
-    const match = url.match(pattern);
-    if (match) return match[1];
-  }
-  return null;
-}
-
-// ─── Format seconds to "Xh Ym" ───────────────────────────────────────────────
-export function formatDuration(seconds: number): string {
-  if (!seconds) return "0m";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
+// ─── Strip server-only fields ─────────────────────────────────────────────────
+export function _publicCourse(course: any) {
+  const { thumbnailPath: _tp, ...rest } = course;
+  return rest;
 }
 
 // ─── GET /api/course ──────────────────────────────────────────────────────────
@@ -60,8 +53,6 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    await connectDB();
-
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search")?.trim() ?? "";
     const subject = searchParams.get("subject")?.trim() ?? "";
@@ -74,38 +65,59 @@ export async function GET(req: NextRequest) {
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "12", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    const query: Record<string, any> = { instructor: auth.userId };
-    if (search) query.$text = { $search: search };
-    if (subject) query.subject = { $regex: subject, $options: "i" };
-    if (classLevel) query.classLevel = classLevel;
-    if (status) query.status = status;
-    if (level) query.level = level;
+    const conditions = [eq(courses.instructorId, auth.userId)];
+    if (search) {
+      conditions.push(
+        or(
+          ilike(courses.title, `%${search}%`),
+          ilike(courses.subject, `%${search}%`),
+          ilike(courses.topic, `%${search}%`),
+          ilike(courses.description, `%${search}%`),
+        )!,
+      );
+    }
+    if (subject) conditions.push(ilike(courses.subject, `%${subject}%`));
+    if (classLevel) conditions.push(eq(courses.classLevel, classLevel as any));
+    if (status) conditions.push(eq(courses.status, status as any));
+    if (level) conditions.push(eq(courses.level, level as any));
 
-    const sortMap: Record<string, Record<string, 1 | -1>> = {
-      newest: { createdAt: -1 },
-      oldest: { createdAt: 1 },
-      title: { title: 1 },
-      popular: { enrollmentsCount: -1 },
+    const whereClause = and(...conditions);
+
+    const orderByMap: Record<string, any> = {
+      newest: desc(courses.createdAt),
+      oldest: asc(courses.createdAt),
+      title: asc(courses.title),
+      popular: desc(courses.enrollmentsCount),
     };
-    const sortOption = sortMap[sort] ?? sortMap.newest;
+    const orderBy = orderByMap[sort] ?? orderByMap.newest;
 
-    const [courses, total] = await Promise.all([
-      Course.find(query)
-        .sort(sortOption)
-        .skip(skip)
+    const [fullRows, totalResult] = await Promise.all([
+      db
+        .select()
+        .from(courses)
+        .where(whereClause)
+        .orderBy(orderBy)
         .limit(limit)
-        // Exclude sections detail from list view — too heavy
-        .select("-sections -thumbnailPath -overview")
-        .lean(),
-      Course.countDocuments(query),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(courses)
+        .where(whereClause),
     ]);
+
+    // List view excludes the heavy sections / overview / server-path columns
+    const rows = fullRows.map(
+      ({ sections, overview, thumbnailPath, ...rest }) => rest,
+    );
+
+    const total = totalResult[0]?.count ?? 0;
 
     return NextResponse.json(
       {
         success: true,
-        data: courses,
+        data: toLegacyList(rows),
         pagination: {
           total,
           page,
@@ -127,22 +139,6 @@ export async function GET(req: NextRequest) {
 }
 
 // ─── POST /api/course ─────────────────────────────────────────────────────────
-// Body: multipart/form-data
-//   title              (required)
-//   subject            (required)
-//   description        (required, tagline ≤ 300)
-//   overview           (optional, long description)
-//   topic              (optional)
-//   classLevel         (optional, default "All")
-//   language           (optional, default "English")
-//   level              (optional, default "All Levels")
-//   status             (optional, default "draft")
-//   certificateEnabled (optional, "true"|"false")
-//   previewVideoUrl    (optional, YouTube URL)
-//   whatYouWillLearn   (optional, JSON array string)
-//   requirements       (optional, JSON array string)
-//   targetAudience     (optional, JSON array string)
-//   thumbnail          (optional, image file ≤ 5MB)
 export async function POST(req: NextRequest) {
   try {
     const auth = requireInstructor(req);
@@ -152,8 +148,6 @@ export async function POST(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const formData = await req.formData();
 
@@ -175,7 +169,6 @@ export async function POST(req: NextRequest) {
       (formData.get("previewVideoUrl") as string | null)?.trim() ?? "";
     const thumbnail = formData.get("thumbnail") as File | null;
 
-    // Parse array fields (sent as JSON strings)
     const safeParseArray = (val: FormDataEntryValue | null): string[] => {
       if (!val) return [];
       try {
@@ -225,38 +218,41 @@ export async function POST(req: NextRequest) {
       thumbnailPath = absolutePath;
     }
 
-    // ── Extract YouTube preview ID ─────────────────────────────────────────
     const previewVideoId = previewVideoUrl
       ? extractYouTubeId(previewVideoUrl)
       : null;
 
-    const course = await Course.create({
-      title,
-      subject,
-      description,
-      overview,
-      topic,
-      classLevel,
-      language,
-      level,
-      status,
-      certificateEnabled,
-      previewVideoUrl: previewVideoUrl || null,
-      previewVideoId,
-      thumbnailUrl,
-      thumbnailPath,
-      whatYouWillLearn,
-      requirements,
-      targetAudience,
-      instructor: auth.userId,
-      sections: [],
-    });
+    const [course] = await db
+      .insert(courses)
+      .values({
+        title,
+        slug: generateSlug(title),
+        subject,
+        description,
+        overview,
+        topic,
+        classLevel: classLevel as any,
+        language,
+        level: level as any,
+        status: status as any,
+        certificateEnabled,
+        previewVideoUrl: previewVideoUrl || null,
+        previewVideoId,
+        thumbnailUrl,
+        thumbnailPath,
+        whatYouWillLearn,
+        requirements,
+        targetAudience,
+        instructorId: auth.userId,
+        sections: [],
+      })
+      .returning();
 
     return NextResponse.json(
       {
         success: true,
         message: "Course created successfully.",
-        data: _publicCourse(course),
+        data: toLegacy(_publicCourse(course)),
       },
       { status: 201 },
     );
@@ -267,11 +263,4 @@ export async function POST(req: NextRequest) {
       { status: 500 },
     );
   }
-}
-
-// ─── Strip server-only fields ─────────────────────────────────────────────────
-export function _publicCourse(course: any) {
-  const obj = course.toObject ? course.toObject() : course;
-  const { thumbnailPath: _tp, ...rest } = obj;
-  return rest;
 }

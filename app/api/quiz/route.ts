@@ -1,7 +1,14 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, asc, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { quizzes } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Quiz from "@/models/Quiz";
+import { toLegacy, toLegacyList } from "@/lib/serialize";
+import {
+  buildQuestions,
+  computeTotalMarks,
+  quizListProjection,
+} from "@/lib/quiz-utils";
 
 // ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireInstructor(req: NextRequest) {
@@ -12,15 +19,34 @@ function requireInstructor(req: NextRequest) {
   return user;
 }
 
+// ─── Sanitise — list/summary view of a quiz (no answers) ───────────────────────
+export function _sanitiseQuiz(quiz: any) {
+  const questions = quiz.questions ?? [];
+  return {
+    _id: quiz.id,
+    id: quiz.id,
+    title: quiz.title,
+    description: quiz.description,
+    subject: quiz.subject,
+    topic: quiz.topic,
+    classLevel: quiz.classLevel,
+    dueDate: quiz.dueDate,
+    totalMarks: quiz.totalMarks,
+    durationMinutes: quiz.durationMinutes,
+    allowLateSubmission: quiz.allowLateSubmission,
+    shuffleQuestions: quiz.shuffleQuestions,
+    status: quiz.status,
+    views: quiz.views,
+    submissionsCount: quiz.submissionsCount,
+    questionCount: questions.length,
+    mcqCount: questions.filter((q: any) => q.type === "mcq").length,
+    theoryCount: questions.filter((q: any) => q.type === "theory").length,
+    createdAt: quiz.createdAt,
+    updatedAt: quiz.updatedAt,
+  };
+}
+
 // ─── GET /api/quiz ─────────────────────────────────────────────────────────────
-// Query params:
-//   search     – free-text (title / subject / topic / description)
-//   subject    – exact match (case-insensitive)
-//   classLevel – "SHS 1" | "SHS 2" | "SHS 3" | "All"
-//   status     – "draft" | "published" | "closed"
-//   page       – default 1
-//   limit      – default 12, max 50
-//   sort       – "newest" | "oldest" | "title" | "dueDate"
 export async function GET(req: NextRequest) {
   try {
     const auth = requireInstructor(req);
@@ -30,8 +56,6 @@ export async function GET(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search")?.trim() ?? "";
@@ -44,47 +68,50 @@ export async function GET(req: NextRequest) {
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "12", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    // ── Query ──────────────────────────────────────────────────────────────
-    const query: Record<string, any> = { instructor: auth.userId };
-    if (search) query.$text = { $search: search };
-    if (subject) query.subject = { $regex: subject, $options: "i" };
-    if (classLevel) query.classLevel = classLevel;
-    if (status) query.status = status;
+    const conditions = [eq(quizzes.instructorId, auth.userId)];
+    if (search) {
+      conditions.push(
+        or(
+          ilike(quizzes.title, `%${search}%`),
+          ilike(quizzes.subject, `%${search}%`),
+          ilike(quizzes.topic, `%${search}%`),
+          ilike(quizzes.description, `%${search}%`),
+        )!,
+      );
+    }
+    if (subject) conditions.push(ilike(quizzes.subject, `%${subject}%`));
+    if (classLevel) conditions.push(eq(quizzes.classLevel, classLevel as any));
+    if (status) conditions.push(eq(quizzes.status, status as any));
 
-    // ── Sort ───────────────────────────────────────────────────────────────
-    const sortMap: Record<string, Record<string, 1 | -1>> = {
-      newest: { createdAt: -1 },
-      oldest: { createdAt: 1 },
-      title: { title: 1 },
-      dueDate: { dueDate: 1 },
+    const whereClause = and(...conditions);
+
+    const orderByMap: Record<string, any> = {
+      newest: desc(quizzes.createdAt),
+      oldest: asc(quizzes.createdAt),
+      title: asc(quizzes.title),
+      dueDate: asc(quizzes.dueDate),
     };
-    const sortOption = sortMap[sort] ?? sortMap.newest;
+    const orderBy = orderByMap[sort] ?? orderByMap.newest;
 
-    // ── Execute ────────────────────────────────────────────────────────────
-    // Exclude question-level model answers and correctOption from list view
-    const [quizzes, total] = await Promise.all([
-      Quiz.find(query)
-        .sort(sortOption)
-        .skip(skip)
+    const [rows, totalResult] = await Promise.all([
+      db
+        .select()
+        .from(quizzes)
+        .where(whereClause)
+        .orderBy(orderBy)
         .limit(limit)
-        .select(
-          "_id title description subject topic classLevel dueDate totalMarks durationMinutes allowLateSubmission shuffleQuestions status views submissionsCount instructor createdAt updatedAt questions._id questions.type questions.text questions.marks questions.options questions.order",
-        )
-        .lean(),
-      Quiz.countDocuments(query),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(quizzes)
+        .where(whereClause),
     ]);
 
-    // Attach question counts
-    const data = quizzes.map((q: any) => ({
-      ...q,
-      questionCount: q.questions?.length ?? 0,
-      mcqCount: q.questions?.filter((qu: any) => qu.type === "mcq").length ?? 0,
-      theoryCount:
-        q.questions?.filter((qu: any) => qu.type === "theory").length ?? 0,
-      questions: undefined, // strip from list view to keep payload small
-    }));
+    // Strip answer-bearing question fields from the list view
+    const data = toLegacyList(rows).map((q) => quizListProjection(q));
+    const total = totalResult[0]?.count ?? 0;
 
     return NextResponse.json(
       {
@@ -111,26 +138,6 @@ export async function GET(req: NextRequest) {
 }
 
 // ─── POST /api/quiz ────────────────────────────────────────────────────────────
-// Body: JSON
-//   title              (required)
-//   subject            (required)
-//   dueDate            (required) ISO string
-//   description        (optional)
-//   topic              (optional)
-//   classLevel         (optional, default "All")
-//   durationMinutes    (optional, null = no timer)
-//   allowLateSubmission (optional)
-//   shuffleQuestions   (optional)
-//   status             (optional, default "published")
-//   questions          (required, array of question objects)
-//     Each question:
-//       type           "mcq" | "theory"
-//       text           string
-//       marks          number
-//       options        [{label, text}, …]  (MCQ only, 2-5 options)
-//       correctOption  "A"|"B"|"C"|"D"|"E" (MCQ only)
-//       modelAnswer    string (theory only)
-//       order          number
 export async function POST(req: NextRequest) {
   try {
     const auth = requireInstructor(req);
@@ -140,8 +147,6 @@ export async function POST(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const body = await req.json();
     const {
@@ -158,7 +163,6 @@ export async function POST(req: NextRequest) {
       questions = [],
     } = body;
 
-    // ── Validate required fields ───────────────────────────────────────────
     if (!title?.trim() || !subject?.trim()) {
       return NextResponse.json(
         { success: false, message: "Title and subject are required." },
@@ -178,78 +182,34 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Validate questions ─────────────────────────────────────────────────
-    for (let i = 0; i < questions.length; i++) {
-      const q = questions[i];
-      if (!q.type || !["mcq", "theory"].includes(q.type)) {
-        return NextResponse.json(
-          {
-            success: false,
-            message: `Question ${i + 1}: type must be "mcq" or "theory".`,
-          },
-          { status: 400 },
-        );
-      }
-      if (!q.text?.trim()) {
-        return NextResponse.json(
-          { success: false, message: `Question ${i + 1}: text is required.` },
-          { status: 400 },
-        );
-      }
-      if (!q.marks || q.marks < 0.5) {
-        return NextResponse.json(
-          {
-            success: false,
-            message: `Question ${i + 1}: marks must be at least 0.5.`,
-          },
-          { status: 400 },
-        );
-      }
-      if (q.type === "mcq") {
-        if (!Array.isArray(q.options) || q.options.length < 2) {
-          return NextResponse.json(
-            {
-              success: false,
-              message: `Question ${i + 1}: MCQ must have at least 2 options.`,
-            },
-            { status: 400 },
-          );
-        }
-        if (!q.correctOption) {
-          return NextResponse.json(
-            {
-              success: false,
-              message: `Question ${i + 1}: MCQ must have a correct option selected.`,
-            },
-            { status: 400 },
-          );
-        }
-      }
+    const validationError = validateQuestions(questions);
+    if (validationError) {
+      return NextResponse.json(
+        { success: false, message: validationError },
+        { status: 400 },
+      );
     }
 
-    // ── Create quiz ────────────────────────────────────────────────────────
-    const quiz = await Quiz.create({
-      title: title.trim(),
-      description: description.trim(),
-      subject: subject.trim(),
-      topic: topic.trim(),
-      classLevel,
-      durationMinutes: durationMinutes ? Number(durationMinutes) : null,
-      dueDate: new Date(dueDateRaw),
-      allowLateSubmission: Boolean(allowLateSubmission),
-      shuffleQuestions: Boolean(shuffleQuestions),
-      status,
-      questions: questions.map((q: any, idx: number) => ({
-        type: q.type,
-        text: q.text.trim(),
-        marks: Number(q.marks),
-        options: q.type === "mcq" ? q.options : [],
-        correctOption: q.type === "mcq" ? q.correctOption : null,
-        modelAnswer: q.type === "theory" ? (q.modelAnswer?.trim() ?? "") : "",
-        order: q.order ?? idx,
-      })),
-      instructor: auth.userId,
-    });
+    const builtQuestions = buildQuestions(questions);
+
+    const [quiz] = await db
+      .insert(quizzes)
+      .values({
+        title: title.trim(),
+        description: description.trim(),
+        subject: subject.trim(),
+        topic: topic.trim(),
+        classLevel,
+        durationMinutes: durationMinutes ? Number(durationMinutes) : null,
+        dueDate: new Date(dueDateRaw),
+        allowLateSubmission: Boolean(allowLateSubmission),
+        shuffleQuestions: Boolean(shuffleQuestions),
+        status,
+        questions: builtQuestions,
+        totalMarks: computeTotalMarks(builtQuestions),
+        instructorId: auth.userId,
+      })
+      .returning();
 
     return NextResponse.json(
       {
@@ -268,29 +228,27 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// ─── Sanitise — strip correctOption / modelAnswer from responses ───────────────
-// (Only omit from student-facing views; instructors get the full object via [id])
-export function _sanitiseQuiz(quiz: any) {
-  return {
-    _id: quiz._id,
-    title: quiz.title,
-    description: quiz.description,
-    subject: quiz.subject,
-    topic: quiz.topic,
-    classLevel: quiz.classLevel,
-    dueDate: quiz.dueDate,
-    totalMarks: quiz.totalMarks,
-    durationMinutes: quiz.durationMinutes,
-    allowLateSubmission: quiz.allowLateSubmission,
-    shuffleQuestions: quiz.shuffleQuestions,
-    status: quiz.status,
-    views: quiz.views,
-    submissionsCount: quiz.submissionsCount,
-    questionCount: quiz.questions?.length ?? 0,
-    mcqCount: quiz.questions?.filter((q: any) => q.type === "mcq").length ?? 0,
-    theoryCount:
-      quiz.questions?.filter((q: any) => q.type === "theory").length ?? 0,
-    createdAt: quiz.createdAt,
-    updatedAt: quiz.updatedAt,
-  };
+// ─── Shared question validation (returns an error string or null) ──────────────
+export function validateQuestions(questions: any[]): string | null {
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    if (!q.type || !["mcq", "theory"].includes(q.type)) {
+      return `Question ${i + 1}: type must be "mcq" or "theory".`;
+    }
+    if (!q.text?.trim()) {
+      return `Question ${i + 1}: text is required.`;
+    }
+    if (!q.marks || q.marks < 0.5) {
+      return `Question ${i + 1}: marks must be at least 0.5.`;
+    }
+    if (q.type === "mcq") {
+      if (!Array.isArray(q.options) || q.options.length < 2) {
+        return `Question ${i + 1}: MCQ must have at least 2 options.`;
+      }
+      if (!q.correctOption) {
+        return `Question ${i + 1}: MCQ must have a correct option selected.`;
+      }
+    }
+  }
+  return null;
 }

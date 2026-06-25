@@ -1,11 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
-import { connectDB } from "@/lib/db";
+import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { users, performances } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import User from "@/models/User";
-import Performance from "@/models/Performance";
+import { toLegacy, toLegacyList } from "@/lib/serialize";
 
-// ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireInstructor(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
@@ -14,16 +14,20 @@ function requireInstructor(req: NextRequest) {
   return user;
 }
 
+const studentColumns = {
+  id: users.id,
+  name: users.name,
+  email: users.email,
+  role: users.role,
+  school: users.school,
+  classLevel: users.classLevel,
+  programme: users.programme,
+  profilePicture: users.profilePicture,
+  createdAt: users.createdAt,
+  updatedAt: users.updatedAt,
+} as const;
+
 // ─── GET /api/students ────────────────────────────────────────────────────────
-// Returns all students with optional search, filter, sort, pagination.
-// Also joins their performance summary if available.
-//
-// Query params:
-//   search     – name / email
-//   classLevel – "SHS 1" | "SHS 2" | "SHS 3"
-//   sort       – "newest" | "oldest" | "name" | "topPerformers"
-//   page       – default 1
-//   limit      – default 20, max 50
 export async function GET(req: NextRequest) {
   try {
     const auth = requireInstructor(req);
@@ -34,8 +38,6 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    await connectDB();
-
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search")?.trim() ?? "";
     const classLevel = searchParams.get("classLevel")?.trim() ?? "";
@@ -45,37 +47,40 @@ export async function GET(req: NextRequest) {
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "20", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    // ── Build query ────────────────────────────────────────────────────────
-    const query: Record<string, any> = { role: "student" };
-
+    const conditions = [eq(users.role, "student")];
     if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { email: { $regex: search, $options: "i" } },
-      ];
+      conditions.push(
+        or(ilike(users.name, `%${search}%`), ilike(users.email, `%${search}%`))!,
+      );
     }
-    if (classLevel) query.classLevel = classLevel;
+    if (classLevel) conditions.push(eq(users.classLevel, classLevel));
 
-    // ── Sort ───────────────────────────────────────────────────────────────
-    const sortMap: Record<string, any> = {
-      newest: { createdAt: -1 },
-      oldest: { createdAt: 1 },
-      name: { name: 1 },
+    const whereClause = and(...conditions);
+
+    const orderByMap: Record<string, any> = {
+      newest: desc(users.createdAt),
+      oldest: asc(users.createdAt),
+      name: asc(users.name),
     };
-    const sortOption = sortMap[sort] ?? sortMap.newest;
+    const orderBy = orderByMap[sort] ?? orderByMap.newest;
 
-    // ── Execute base query ─────────────────────────────────────────────────
-    const [students, total] = await Promise.all([
-      User.find(query)
-        .sort(sortOption)
-        .skip(skip)
+    const [students, totalResult] = await Promise.all([
+      db
+        .select(studentColumns)
+        .from(users)
+        .where(whereClause)
+        .orderBy(orderBy)
         .limit(limit)
-        .select("-password -profilePicturePublicId")
-        .lean(),
-      User.countDocuments(query),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(users)
+        .where(whereClause),
     ]);
+
+    const total = totalResult[0]?.count ?? 0;
 
     if (!students.length) {
       return NextResponse.json(
@@ -96,24 +101,31 @@ export async function GET(req: NextRequest) {
     }
 
     // ── Join performance data ──────────────────────────────────────────────
-    const studentIds = students.map((s) => s._id);
-    const performances = await Performance.find({
-      student: { $in: studentIds },
-      instructor: auth.userId,
-    })
-      .select(
-        "student overallPercentage totalActivities quizCount assignmentCount lastActivityAt",
-      )
-      .lean();
+    const studentIds = students.map((s) => s.id);
+    const perfRows = await db
+      .select({
+        student: performances.studentId,
+        overallPercentage: performances.overallPercentage,
+        totalActivities: performances.totalActivities,
+        quizCount: performances.quizCount,
+        assignmentCount: performances.assignmentCount,
+        lastActivityAt: performances.lastActivityAt,
+      })
+      .from(performances)
+      .where(
+        and(
+          inArray(performances.studentId, studentIds),
+          eq(performances.instructorId, auth.userId),
+        ),
+      );
 
-    const perfMap = new Map(performances.map((p) => [String(p.student), p]));
+    const perfMap = new Map(perfRows.map((p) => [String(p.student), p]));
 
     const enriched = students.map((s) => ({
-      ...s,
-      performance: perfMap.get(String(s._id)) ?? null,
+      ...toLegacy(s),
+      performance: perfMap.get(String(s.id)) ?? null,
     }));
 
-    // ── Sort by performance if requested ───────────────────────────────────
     if (sort === "topPerformers") {
       enriched.sort((a, b) => {
         const aP = (a.performance as any)?.overallPercentage ?? -1;
@@ -147,8 +159,6 @@ export async function GET(req: NextRequest) {
 }
 
 // ─── POST /api/students ───────────────────────────────────────────────────────
-// Instructor creates a student account manually.
-// Body: JSON { name, email, password, school?, classLevel?, programme? }
 export async function POST(req: NextRequest) {
   try {
     const auth = requireInstructor(req);
@@ -159,13 +169,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    await connectDB();
-
     const body = await req.json();
     const {
       name,
       email,
-      password = "student123", // default password — student should change it
+      password = "student123",
       school,
       classLevel,
       programme,
@@ -178,7 +186,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const existing = await User.findOne({ email: email.toLowerCase() });
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const [existing] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, normalizedEmail))
+      .limit(1);
+
     if (existing) {
       return NextResponse.json(
         { success: false, message: "A user with this email already exists." },
@@ -189,31 +204,24 @@ export async function POST(req: NextRequest) {
     const salt = await bcrypt.genSalt(12);
     const hashed = await bcrypt.hash(password, salt);
 
-    const student = await User.create({
-      name: name.trim(),
-      email: email.toLowerCase().trim(),
-      password: hashed,
-      role: "student",
-      school: school?.trim() ?? "",
-      classLevel: classLevel?.trim() ?? "",
-      programme: programme?.trim() ?? "",
-    });
+    const [student] = await db
+      .insert(users)
+      .values({
+        name: name.trim(),
+        email: normalizedEmail,
+        password: hashed,
+        role: "student",
+        school: school?.trim() ?? "",
+        classLevel: classLevel?.trim() ?? "",
+        programme: programme?.trim() ?? "",
+      })
+      .returning(studentColumns);
 
     return NextResponse.json(
       {
         success: true,
         message: "Student account created successfully.",
-        data: {
-          _id: student._id,
-          name: student.name,
-          email: student.email,
-          role: student.role,
-          school: student.school,
-          classLevel: student.classLevel,
-          programme: student.programme,
-          profilePicture: student.profilePicture,
-          createdAt: student.createdAt,
-        },
+        data: toLegacy(student),
       },
       { status: 201 },
     );

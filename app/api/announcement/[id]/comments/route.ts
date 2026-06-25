@@ -1,13 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { announcements, announcementComments, users } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Announcement from "@/models/Announcement";
-import {
-  uploadManyToCloudinary,
-  deleteManyFromCloudinary,
-  ALLOWED_TYPES,
-} from "@/lib/Cloudinaryupload";
-import AnnouncementComment from "@/models/Announcementcomment";
+import { toLegacy, toLegacyList } from "@/lib/serialize";
+import { uploadManyToCloudinary, ALLOWED_TYPES } from "@/lib/Cloudinaryupload";
 
 function requireAuth(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
@@ -15,9 +12,32 @@ function requireAuth(req: NextRequest) {
   return verifyToken(token);
 }
 
+// Comment columns + joined author object (mirrors the old populate)
+const commentSelect = {
+  id: announcementComments.id,
+  announcementId: announcementComments.announcementId,
+  authorRole: announcementComments.authorRole,
+  body: announcementComments.body,
+  attachments: announcementComments.attachments,
+  parentCommentId: announcementComments.parentCommentId,
+  repliesCount: announcementComments.repliesCount,
+  likes: announcementComments.likes,
+  likesCount: announcementComments.likesCount,
+  isEdited: announcementComments.isEdited,
+  editedAt: announcementComments.editedAt,
+  isDeleted: announcementComments.isDeleted,
+  createdAt: announcementComments.createdAt,
+  updatedAt: announcementComments.updatedAt,
+  author: {
+    id: users.id,
+    name: users.name,
+    email: users.email,
+    role: users.role,
+    profilePicture: users.profilePicture,
+  },
+} as const;
+
 // ─── GET /api/announcement/[id]/comments ──────────────────────────────────────
-// Returns top-level comments + their replies nested one level deep
-// Query: page, limit
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -31,7 +51,6 @@ export async function GET(
       );
 
     const { id } = await params;
-    await connectDB();
 
     const { searchParams } = new URL(req.url);
     const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
@@ -39,49 +58,59 @@ export async function GET(
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "20", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    // Top-level comments only
-    const [topLevelComments, total] = await Promise.all([
-      AnnouncementComment.find({
-        announcement: id,
-        parentComment: null,
-        isDeleted: false,
-      })
-        .sort({ createdAt: 1 })
-        .skip(skip)
+    const topLevelWhere = and(
+      eq(announcementComments.announcementId, id),
+      isNull(announcementComments.parentCommentId),
+      eq(announcementComments.isDeleted, false),
+    );
+
+    const [topLevelComments, totalResult] = await Promise.all([
+      db
+        .select(commentSelect)
+        .from(announcementComments)
+        .innerJoin(users, eq(announcementComments.authorId, users.id))
+        .where(topLevelWhere)
+        .orderBy(asc(announcementComments.createdAt))
         .limit(limit)
-        .populate("author", "name email avatar role")
-        .lean(),
-      AnnouncementComment.countDocuments({
-        announcement: id,
-        parentComment: null,
-        isDeleted: false,
-      }),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(announcementComments)
+        .where(topLevelWhere),
     ]);
 
-    // Fetch replies for all visible top-level comments
-    const topLevelIds = topLevelComments.map((c: any) => c._id);
-    const replies = await AnnouncementComment.find({
-      announcement: id,
-      parentComment: { $in: topLevelIds },
-      isDeleted: false,
-    })
-      .sort({ createdAt: 1 })
-      .populate("author", "name email avatar role")
-      .lean();
+    const total = totalResult[0]?.count ?? 0;
 
-    // Attach replies to their parent
+    // Fetch replies for all visible top-level comments
+    const topLevelIds = topLevelComments.map((c) => c.id);
+    const replies =
+      topLevelIds.length > 0
+        ? await db
+            .select(commentSelect)
+            .from(announcementComments)
+            .innerJoin(users, eq(announcementComments.authorId, users.id))
+            .where(
+              and(
+                eq(announcementComments.announcementId, id),
+                inArray(announcementComments.parentCommentId, topLevelIds),
+                eq(announcementComments.isDeleted, false),
+              ),
+            )
+            .orderBy(asc(announcementComments.createdAt))
+        : [];
+
     const repliesMap: Record<string, any[]> = {};
     for (const reply of replies) {
-      const key = String((reply as any).parentComment);
+      const key = String(reply.parentCommentId);
       if (!repliesMap[key]) repliesMap[key] = [];
-      repliesMap[key].push(reply);
+      repliesMap[key].push(toLegacy(reply));
     }
 
-    const enriched = topLevelComments.map((c: any) => ({
-      ...c,
-      replies: repliesMap[String(c._id)] ?? [],
+    const enriched = topLevelComments.map((c) => ({
+      ...toLegacy(c),
+      replies: repliesMap[String(c.id)] ?? [],
     }));
 
     return NextResponse.json(
@@ -109,10 +138,6 @@ export async function GET(
 }
 
 // ─── POST /api/announcement/[id]/comments ─────────────────────────────────────
-// Body: multipart/form-data
-//   body            (optional if files provided)
-//   parentComment   (optional, ID for reply)
-//   files           (optional, up to 3 attachments)
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -126,12 +151,17 @@ export async function POST(
       );
 
     const { id } = await params;
-    await connectDB();
 
-    // Check the announcement exists and allows comments
-    const announcement = await Announcement.findById(id).select(
-      "allowComments status instructor",
-    );
+    const [announcement] = await db
+      .select({
+        allowComments: announcements.allowComments,
+        status: announcements.status,
+        instructorId: announcements.instructorId,
+      })
+      .from(announcements)
+      .where(eq(announcements.id, id))
+      .limit(1);
+
     if (!announcement) {
       return NextResponse.json(
         { success: false, message: "Announcement not found." },
@@ -151,7 +181,7 @@ export async function POST(
     const formData = await req.formData();
     const body = (formData.get("body") as string | null)?.trim() ?? "";
     const parentCommentId =
-      (formData.get("parentComment") as string | null)?.trim() ?? null;
+      (formData.get("parentComment") as string | null)?.trim() || null;
     const files = (formData.getAll("files") as File[]).filter(
       (f) => f.size > 0,
     );
@@ -166,7 +196,6 @@ export async function POST(
       );
     }
 
-    // Validate file types
     for (const file of files) {
       if (!ALLOWED_TYPES.includes(file.type)) {
         return NextResponse.json(
@@ -179,7 +208,6 @@ export async function POST(
       }
     }
 
-    // Upload attachments
     let attachments: any[] = [];
     if (files.length > 0) {
       const { attachments: uploaded, errors } = await uploadManyToCloudinary(
@@ -190,33 +218,42 @@ export async function POST(
       if (errors.length > 0) console.warn("[COMMENT UPLOAD ERRORS]", errors);
     }
 
-    const comment = await AnnouncementComment.create({
-      announcement: id,
-      author: auth.userId,
-      authorRole: auth.role,
-      body,
-      attachments,
-      parentComment: parentCommentId || null,
-    });
+    const [comment] = await db
+      .insert(announcementComments)
+      .values({
+        announcementId: id,
+        authorId: auth.userId,
+        authorRole: auth.role,
+        body,
+        attachments,
+        parentCommentId: parentCommentId || null,
+      })
+      .returning();
 
     // If this is a reply, increment the parent's repliesCount
     if (parentCommentId) {
-      AnnouncementComment.findByIdAndUpdate(parentCommentId, {
-        $inc: { repliesCount: 1 },
-      })
-        .exec()
+      db.update(announcementComments)
+        .set({ repliesCount: sql`${announcementComments.repliesCount} + 1` })
+        .where(eq(announcementComments.id, parentCommentId))
         .catch(() => {});
     }
 
     // Increment announcement commentsCount
-    Announcement.findByIdAndUpdate(id, { $inc: { commentsCount: 1 } })
-      .exec()
+    db.update(announcements)
+      .set({ commentsCount: sql`${announcements.commentsCount} + 1` })
+      .where(eq(announcements.id, id))
       .catch(() => {});
 
-    await comment.populate("author", "name email avatar role");
+    // Re-fetch with author joined
+    const [withAuthor] = await db
+      .select(commentSelect)
+      .from(announcementComments)
+      .innerJoin(users, eq(announcementComments.authorId, users.id))
+      .where(eq(announcementComments.id, comment.id))
+      .limit(1);
 
     return NextResponse.json(
-      { success: true, message: "Comment posted.", data: comment.toObject() },
+      { success: true, message: "Comment posted.", data: toLegacy(withAuthor) },
       { status: 201 },
     );
   } catch (error: any) {
@@ -227,3 +264,5 @@ export async function POST(
     );
   }
 }
+
+export { commentSelect };

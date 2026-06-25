@@ -1,11 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
-import { connectDB } from "@/lib/db";
+import { and, eq, ne } from "drizzle-orm";
+import { db } from "@/src/db";
+import { users, performances } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import User from "@/models/User";
-import Performance from "@/models/Performance";
+import { toLegacy } from "@/lib/serialize";
 
-// ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireInstructor(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
@@ -13,6 +13,19 @@ function requireInstructor(req: NextRequest) {
   if (!user || user.role !== "instructor") return null;
   return user;
 }
+
+const studentColumns = {
+  id: users.id,
+  name: users.name,
+  email: users.email,
+  role: users.role,
+  school: users.school,
+  classLevel: users.classLevel,
+  programme: users.programme,
+  profilePicture: users.profilePicture,
+  createdAt: users.createdAt,
+  updatedAt: users.updatedAt,
+} as const;
 
 // ─── GET /api/students/[id] ───────────────────────────────────────────────────
 export async function GET(
@@ -29,11 +42,12 @@ export async function GET(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    const student = await User.findOne({ _id: id, role: "student" })
-      .select("-password -profilePicturePublicId")
-      .lean();
+    const [student] = await db
+      .select(studentColumns)
+      .from(users)
+      .where(and(eq(users.id, id), eq(users.role, "student")))
+      .limit(1);
 
     if (!student) {
       return NextResponse.json(
@@ -42,13 +56,25 @@ export async function GET(
       );
     }
 
-    const performance = await Performance.findOne({
-      student: id,
-      instructor: auth.userId,
-    }).lean();
+    const [performance] = await db
+      .select()
+      .from(performances)
+      .where(
+        and(
+          eq(performances.studentId, id),
+          eq(performances.instructorId, auth.userId),
+        ),
+      )
+      .limit(1);
 
     return NextResponse.json(
-      { success: true, data: { ...student, performance } },
+      {
+        success: true,
+        data: {
+          ...toLegacy(student),
+          performance: performance ? toLegacy(performance) : null,
+        },
+      },
       { status: 200 },
     );
   } catch (error: any) {
@@ -61,7 +87,6 @@ export async function GET(
 }
 
 // ─── PATCH /api/students/[id] ─────────────────────────────────────────────────
-// Instructor can update: name, email, school, classLevel, programme, password
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -76,9 +101,13 @@ export async function PATCH(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    const student = await User.findOne({ _id: id, role: "student" });
+    const [student] = await db
+      .select()
+      .from(users)
+      .where(and(eq(users.id, id), eq(users.role, "student")))
+      .limit(1);
+
     if (!student) {
       return NextResponse.json(
         { success: false, message: "Student not found." },
@@ -89,23 +118,26 @@ export async function PATCH(
     const body = await req.json();
     const { name, email, school, classLevel, programme, newPassword } = body;
 
-    if (name?.trim()) student.name = name.trim();
-    if (school !== undefined) student.school = school?.trim() ?? "";
-    if (classLevel !== undefined) student.classLevel = classLevel?.trim() ?? "";
-    if (programme !== undefined) student.programme = programme?.trim() ?? "";
+    const updates: Partial<typeof users.$inferInsert> = {};
+
+    if (name?.trim()) updates.name = name.trim();
+    if (school !== undefined) updates.school = school?.trim() ?? "";
+    if (classLevel !== undefined) updates.classLevel = classLevel?.trim() ?? "";
+    if (programme !== undefined) updates.programme = programme?.trim() ?? "";
 
     if (email?.trim() && email.toLowerCase() !== student.email) {
-      const clash = await User.findOne({
-        email: email.toLowerCase(),
-        _id: { $ne: id },
-      });
+      const [clash] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.email, email.toLowerCase()), ne(users.id, id)))
+        .limit(1);
       if (clash) {
         return NextResponse.json(
           { success: false, message: "Email already in use." },
           { status: 409 },
         );
       }
-      student.email = email.toLowerCase().trim();
+      updates.email = email.toLowerCase().trim();
     }
 
     if (newPassword) {
@@ -119,27 +151,20 @@ export async function PATCH(
         );
       }
       const salt = await bcrypt.genSalt(12);
-      student.password = await bcrypt.hash(newPassword, salt);
+      updates.password = await bcrypt.hash(newPassword, salt);
     }
 
-    await student.save();
+    const [updated] = await db
+      .update(users)
+      .set(updates)
+      .where(eq(users.id, id))
+      .returning(studentColumns);
 
     return NextResponse.json(
       {
         success: true,
         message: "Student updated successfully.",
-        data: {
-          _id: student._id,
-          name: student.name,
-          email: student.email,
-          role: student.role,
-          school: student.school,
-          classLevel: student.classLevel,
-          programme: student.programme,
-          profilePicture: student.profilePicture,
-          createdAt: student.createdAt,
-          updatedAt: student.updatedAt,
-        },
+        data: toLegacy(updated),
       },
       { status: 200 },
     );
@@ -153,8 +178,6 @@ export async function PATCH(
 }
 
 // ─── DELETE /api/students/[id] ────────────────────────────────────────────────
-// Hard-deletes the student account.
-// Also cleans up performance records scoped to this instructor.
 export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -169,9 +192,13 @@ export async function DELETE(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    const student = await User.findOne({ _id: id, role: "student" });
+    const [student] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.id, id), eq(users.role, "student")))
+      .limit(1);
+
     if (!student) {
       return NextResponse.json(
         { success: false, message: "Student not found." },
@@ -179,11 +206,9 @@ export async function DELETE(
       );
     }
 
-    // Delete user + performance records (fire-and-forget for perf records)
-    await User.deleteOne({ _id: id });
-    Performance.deleteMany({ student: id })
-      .exec()
-      .catch(() => {});
+    // Related rows (enrollments, submissions, performances) are removed via
+    // ON DELETE CASCADE foreign keys defined in the schema.
+    await db.delete(users).where(eq(users.id, id));
 
     return NextResponse.json(
       { success: true, message: "Student deleted successfully." },

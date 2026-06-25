@@ -1,5 +1,5 @@
 import cloudinary from "@/lib/cloudinary";
-import type { IAttachment } from "@/models/Announcement";
+import type { Attachment as IAttachment } from "@/src/schema";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB per file

@@ -1,13 +1,12 @@
 import { type NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
-import { connectDB } from "@/lib/db";
-import User from "@/models/User";
+import { eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { users } from "@/src/schema";
 import { generateToken } from "@/lib/jwt";
 
 export async function POST(req: NextRequest) {
   try {
-    await connectDB();
-
     const body = await req.json();
     const { name, email, password, school, classLevel, programme, role } = body;
 
@@ -26,8 +25,25 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (password.length < 6) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Password must be at least 6 characters.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
     // ── Check if email already exists ──────────────────────────────────────
-    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    const [existingUser] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, normalizedEmail))
+      .limit(1);
+
     if (existingUser) {
       return NextResponse.json(
         {
@@ -43,18 +59,22 @@ export async function POST(req: NextRequest) {
     const hashedPassword = await bcrypt.hash(password, salt);
 
     // ── Create student (only students can self-register) ───────────────────
-    const user = await User.create({
-      name,
-      email: email.toLowerCase(),
-      password: hashedPassword,
-      role: role === "instructor" ? "instructor" : "student",
-      school,
-      classLevel,
-      programme,
-    });
+    const [user] = await db
+      .insert(users)
+      .values({
+        name: name.trim(),
+        email: normalizedEmail,
+        password: hashedPassword,
+        role: role === "instructor" ? "instructor" : "student",
+        school: school.trim(),
+        classLevel: classLevel.trim(),
+        programme: programme.trim(),
+      })
+      .returning();
+
     // ── Generate JWT ───────────────────────────────────────────────────────
     const token = generateToken({
-      userId: user._id.toString(),
+      userId: user.id,
       email: user.email,
       role: user.role,
     });
@@ -65,7 +85,8 @@ export async function POST(req: NextRequest) {
         success: true,
         message: "Account created successfully.",
         user: {
-          id: user._id,
+          id: user.id,
+          _id: user.id,
           name: user.name,
           email: user.email,
           role: user.role,

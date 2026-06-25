@@ -1,15 +1,16 @@
 import { type NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { connectDB } from "@/lib/db";
+import { and, asc, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { lectureNotes } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import LectureNote from "@/models/Lecturenote";
+import { toLegacy, toLegacyList } from "@/lib/serialize";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
-// Resolved at runtime — works in both dev and production builds
 const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads", "notes");
-const UPLOAD_URL_BASE = "/uploads/notes"; // served statically by Next.js
+const UPLOAD_URL_BASE = "/uploads/notes";
 
 // ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireInstructor(req: NextRequest) {
@@ -20,14 +21,7 @@ function requireInstructor(req: NextRequest) {
   return user;
 }
 
-// ─── GET /api/notes ───────────────────────────────────────────────────────────
-// Query params:
-//   search     – free-text (title / subject / topic / description)
-//   subject    – exact match (case-insensitive)
-//   classLevel – "SHS 1" | "SHS 2" | "SHS 3" | "All"
-//   page       – default 1
-//   limit      – default 10, max 50
-//   sort       – "newest" | "oldest" | "title"
+// ─── GET /api/upload ──────────────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   try {
     const auth = requireInstructor(req);
@@ -37,8 +31,6 @@ export async function GET(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search")?.trim() ?? "";
@@ -50,46 +42,53 @@ export async function GET(req: NextRequest) {
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "10", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    // ── Query ──────────────────────────────────────────────────────────────
-    // Instructors only see their own notes
-    const query: Record<string, any> = { instructor: auth.userId };
-
+    const conditions = [eq(lectureNotes.instructorId, auth.userId)];
     if (search) {
-      query.$text = { $search: search };
+      conditions.push(
+        or(
+          ilike(lectureNotes.title, `%${search}%`),
+          ilike(lectureNotes.subject, `%${search}%`),
+          ilike(lectureNotes.topic, `%${search}%`),
+          ilike(lectureNotes.description, `%${search}%`),
+        )!,
+      );
     }
-    if (subject) {
-      query.subject = { $regex: subject, $options: "i" };
-    }
-    if (classLevel) {
-      query.classLevel = classLevel;
-    }
+    if (subject) conditions.push(ilike(lectureNotes.subject, `%${subject}%`));
+    if (classLevel)
+      conditions.push(eq(lectureNotes.classLevel, classLevel as any));
 
-    // ── Sort ───────────────────────────────────────────────────────────────
-    const sortMap: Record<string, Record<string, 1 | -1>> = {
-      newest: { createdAt: -1 },
-      oldest: { createdAt: 1 },
-      title: { title: 1 },
+    const whereClause = and(...conditions);
+
+    const orderByMap: Record<string, any> = {
+      newest: desc(lectureNotes.createdAt),
+      oldest: asc(lectureNotes.createdAt),
+      title: asc(lectureNotes.title),
     };
-    const sortOption = sortMap[sort] ?? sortMap.newest;
+    const orderBy = orderByMap[sort] ?? orderByMap.newest;
 
-    // ── Execute ────────────────────────────────────────────────────────────
-    // Exclude the internal filePath from the response — clients don't need it
-    const [notes, total] = await Promise.all([
-      LectureNote.find(query)
-        .sort(sortOption)
-        .skip(skip)
+    const [fullRows, totalResult] = await Promise.all([
+      db
+        .select()
+        .from(lectureNotes)
+        .where(whereClause)
+        .orderBy(orderBy)
         .limit(limit)
-        .select("-filePath")
-        .lean(),
-      LectureNote.countDocuments(query),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(lectureNotes)
+        .where(whereClause),
     ]);
+
+    const rows = fullRows.map(({ filePath, ...rest }) => rest);
+    const total = totalResult[0]?.count ?? 0;
 
     return NextResponse.json(
       {
         success: true,
-        data: notes,
+        data: toLegacyList(rows),
         pagination: {
           total,
           page,
@@ -110,14 +109,7 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// ─── POST /api/notes ──────────────────────────────────────────────────────────
-// Body: multipart/form-data
-//   file        (required) – PDF only
-//   title       (required)
-//   subject     (required)
-//   description (optional)
-//   topic       (optional)
-//   classLevel  (optional, default "All")
+// ─── POST /api/upload ─────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
     const auth = requireInstructor(req);
@@ -127,8 +119,6 @@ export async function POST(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const formData = await req.formData();
 
@@ -141,7 +131,6 @@ export async function POST(req: NextRequest) {
     const classLevel =
       (formData.get("classLevel") as string | null)?.trim() || "All";
 
-    // ── Validate text fields ───────────────────────────────────────────────
     if (!title || !subject) {
       return NextResponse.json(
         { success: false, message: "Title and subject are required." },
@@ -149,7 +138,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Validate file ──────────────────────────────────────────────────────
     if (!file || file.size === 0) {
       return NextResponse.json(
         { success: false, message: "A PDF file is required." },
@@ -169,51 +157,39 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Save file to disk ──────────────────────────────────────────────────
-    // Sanitise the original filename: strip path separators, collapse spaces
     const sanitisedName = file.name.replace(/[/\\]/g, "").replace(/\s+/g, "_");
     const uniqueFileName = `${Date.now()}-${sanitisedName}`;
     const absolutePath = path.join(UPLOAD_DIR, uniqueFileName);
     const publicUrl = `${UPLOAD_URL_BASE}/${uniqueFileName}`;
 
-    // Ensure the uploads directory exists (recursive = no error if already there)
     await fs.mkdir(UPLOAD_DIR, { recursive: true });
 
     const arrayBuffer = await file.arrayBuffer();
     await fs.writeFile(absolutePath, new Uint8Array(arrayBuffer));
 
-    // ── Save metadata to MongoDB ───────────────────────────────────────────
-    const note = await LectureNote.create({
-      title,
-      description,
-      subject,
-      topic,
-      classLevel,
-      fileUrl: publicUrl,
-      filePath: absolutePath, // stored privately — never sent to the client
-      fileName: file.name, // original human-readable name for display
-      fileSize: file.size,
-      instructor: auth.userId,
-    });
+    const [note] = await db
+      .insert(lectureNotes)
+      .values({
+        title,
+        description,
+        subject,
+        topic,
+        classLevel: classLevel as any,
+        fileUrl: publicUrl,
+        filePath: absolutePath,
+        fileName: file.name,
+        fileSize: file.size,
+        instructorId: auth.userId,
+      })
+      .returning();
+
+    const { filePath: _fp, ...safe } = note;
 
     return NextResponse.json(
       {
         success: true,
         message: "Lecture note uploaded successfully.",
-        data: {
-          _id: note._id,
-          title: note.title,
-          subject: note.subject,
-          topic: note.topic,
-          classLevel: note.classLevel,
-          description: note.description,
-          fileUrl: note.fileUrl,
-          fileName: note.fileName,
-          fileSize: note.fileSize,
-          views: note.views,
-          downloads: note.downloads,
-          createdAt: note.createdAt,
-        },
+        data: toLegacy(safe),
       },
       { status: 201 },
     );

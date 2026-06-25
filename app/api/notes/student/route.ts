@@ -1,9 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { lectureNotes } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import LectureNote from "@/models/Lecturenote";
+import { toLegacyList } from "@/lib/serialize";
 
-// ─── Auth helper (students + instructors) ─────────────────────────────────────
 function requireAuth(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
@@ -11,16 +12,6 @@ function requireAuth(req: NextRequest) {
 }
 
 // ─── GET /api/notes/student ───────────────────────────────────────────────────
-// Returns all published lecture notes visible to the authenticated student.
-// Notes are matched by the student's classLevel (or "All" class-level notes).
-//
-// Query params:
-//   search     – free-text (title / subject / topic / description)
-//   subject    – exact match (case-insensitive)
-//   classLevel – override filter; default uses the student's own classLevel
-//   page       – default 1
-//   limit      – default 12, max 50
-//   sort       – "newest" | "oldest" | "title"
 export async function GET(req: NextRequest) {
   try {
     const auth = requireAuth(req);
@@ -30,8 +21,6 @@ export async function GET(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search")?.trim() ?? "";
@@ -43,55 +32,57 @@ export async function GET(req: NextRequest) {
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "12", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    // ── Build query ────────────────────────────────────────────────────────
-    // Students see notes targeted at:
-    //   - "All" class levels, OR
-    //   - Their specific class level (if known)
-    //   - Also supports an explicit classLevel override from the query string
-    const query: Record<string, any> = {};
+    const conditions = [];
 
     if (classLevelParam) {
-      // Explicit filter from the UI
-      query.classLevel =
-        classLevelParam === "All"
-          ? { $in: ["All"] }
-          : { $in: ["All", classLevelParam] };
+      const allowed =
+        classLevelParam === "All" ? ["All"] : ["All", classLevelParam];
+      conditions.push(inArray(lectureNotes.classLevel, allowed as any));
     }
-    // No classLevel filter → return everything (all notes are visible to all students)
-
     if (search) {
-      query.$text = { $search: search };
+      conditions.push(
+        or(
+          ilike(lectureNotes.title, `%${search}%`),
+          ilike(lectureNotes.subject, `%${search}%`),
+          ilike(lectureNotes.topic, `%${search}%`),
+          ilike(lectureNotes.description, `%${search}%`),
+        )!,
+      );
     }
-    if (subject) {
-      query.subject = { $regex: subject, $options: "i" };
-    }
+    if (subject) conditions.push(ilike(lectureNotes.subject, `%${subject}%`));
 
-    // ── Sort ───────────────────────────────────────────────────────────────
-    const sortMap: Record<string, Record<string, 1 | -1>> = {
-      newest: { createdAt: -1 },
-      oldest: { createdAt: 1 },
-      title: { title: 1 },
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const orderByMap: Record<string, any> = {
+      newest: desc(lectureNotes.createdAt),
+      oldest: asc(lectureNotes.createdAt),
+      title: asc(lectureNotes.title),
     };
-    const sortOption = sortMap[sort] ?? sortMap.newest;
+    const orderBy = orderByMap[sort] ?? orderByMap.newest;
 
-    // ── Execute ────────────────────────────────────────────────────────────
-    // Never expose filePath to students
-    const [notes, total] = await Promise.all([
-      LectureNote.find(query)
-        .sort(sortOption)
-        .skip(skip)
+    const [fullRows, totalResult] = await Promise.all([
+      db
+        .select()
+        .from(lectureNotes)
+        .where(whereClause)
+        .orderBy(orderBy)
         .limit(limit)
-        .select("-filePath")
-        .lean(),
-      LectureNote.countDocuments(query),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(lectureNotes)
+        .where(whereClause),
     ]);
+
+    const rows = fullRows.map(({ filePath, ...rest }) => rest);
+    const total = totalResult[0]?.count ?? 0;
 
     return NextResponse.json(
       {
         success: true,
-        data: notes,
+        data: toLegacyList(rows),
         pagination: {
           total,
           page,

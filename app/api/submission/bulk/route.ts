@@ -1,20 +1,19 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, eq, inArray } from "drizzle-orm";
+import { db } from "@/src/db";
+import { submissions } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Submission from "@/models/Submission";
+import { toLegacyList } from "@/lib/serialize";
+import { isUuid } from "@/lib/validation";
 
-// ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireAuth(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
-  const user = verifyToken(token);
-  if (!user) return null;
-  return user;
+  return verifyToken(token);
 }
 
 // ─── GET /api/submission/bulk?ids=id1,id2,id3 ─────────────────────────────────
 // Returns the current student's submissions for the given assignment IDs.
-// Only returns submissions belonging to the authenticated user.
 export async function GET(req: NextRequest) {
   try {
     const auth = requireAuth(req);
@@ -35,22 +34,37 @@ export async function GET(req: NextRequest) {
     const ids = idsParam
       .split(",")
       .map((id) => id.trim())
-      .filter(Boolean)
+      .filter((id) => isUuid(id))
       .slice(0, 100); // cap at 100 to prevent abuse
 
-    await connectDB();
+    if (ids.length === 0) {
+      return NextResponse.json({ success: true, data: [] }, { status: 200 });
+    }
 
-    const submissions = await Submission.find({
-      assignment: { $in: ids },
-      student: auth.userId,
-    })
-      .select(
-        "_id assignment submittedAt fileUrl fileName fileSize note status score feedback isLate",
-      )
-      .lean();
+    const rows = await db
+      .select({
+        id: submissions.id,
+        assignmentId: submissions.assignmentId,
+        submittedAt: submissions.submittedAt,
+        fileUrl: submissions.fileUrl,
+        fileName: submissions.fileName,
+        fileSize: submissions.fileSize,
+        note: submissions.note,
+        status: submissions.status,
+        score: submissions.score,
+        feedback: submissions.feedback,
+        isLate: submissions.isLate,
+      })
+      .from(submissions)
+      .where(
+        and(
+          inArray(submissions.assignmentId, ids),
+          eq(submissions.studentId, auth.userId),
+        ),
+      );
 
     return NextResponse.json(
-      { success: true, data: submissions },
+      { success: true, data: toLegacyList(rows) },
       { status: 200 },
     );
   } catch (error: any) {

@@ -1,10 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { connectDB } from "@/lib/db";
+import { and, eq, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { assignments, submissions } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Assignment from "@/models/Assignment";
-import Submission from "@/models/Submission";
+import { toLegacy } from "@/lib/serialize";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
@@ -24,9 +25,7 @@ const ALLOWED_MIME_TYPES = [
 function requireAuth(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
-  const user = verifyToken(token);
-  if (!user) return null;
-  return user;
+  return verifyToken(token);
 }
 
 // ─── POST /api/submission ─────────────────────────────────────────────────────
@@ -39,8 +38,6 @@ export async function POST(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const formData = await req.formData();
     const assignmentId = (formData.get("assignmentId") as string)?.trim();
@@ -65,21 +62,18 @@ export async function POST(req: NextRequest) {
     }
 
     // ── Fetch the assignment ───────────────────────────────────────────────
-    const assignment = await Assignment.findById(assignmentId).select(
-      "status dueDate allowLateSubmission title subject",
-    );
-
-    console.log("[SUBMISSION DEBUG] assignmentId:", assignmentId);
-    console.log(
-      "[SUBMISSION DEBUG] assignment found:",
-      assignment
-        ? {
-            status: assignment.status,
-            dueDate: assignment.dueDate,
-            allowLateSubmission: assignment.allowLateSubmission,
-          }
-        : null,
-    );
+    const [assignment] = await db
+      .select({
+        id: assignments.id,
+        status: assignments.status,
+        dueDate: assignments.dueDate,
+        allowLateSubmission: assignments.allowLateSubmission,
+        title: assignments.title,
+        subject: assignments.subject,
+      })
+      .from(assignments)
+      .where(eq(assignments.id, assignmentId))
+      .limit(1);
 
     if (!assignment) {
       return NextResponse.json(
@@ -90,7 +84,6 @@ export async function POST(req: NextRequest) {
 
     // ── Status check ───────────────────────────────────────────────────────
     if (assignment.status !== "published") {
-      console.log("[SUBMISSION DEBUG] BLOCKED — status is:", assignment.status);
       return NextResponse.json(
         {
           success: false,
@@ -108,17 +101,7 @@ export async function POST(req: NextRequest) {
     const dueDate = new Date(assignment.dueDate);
     const isLate = now > dueDate;
 
-    console.log("[SUBMISSION DEBUG] now:", now.toISOString());
-    console.log("[SUBMISSION DEBUG] dueDate:", dueDate.toISOString());
-    console.log(
-      "[SUBMISSION DEBUG] isLate:",
-      isLate,
-      "| allowLateSubmission:",
-      assignment.allowLateSubmission,
-    );
-
     if (isLate && !assignment.allowLateSubmission) {
-      console.log("[SUBMISSION DEBUG] BLOCKED — late submission not allowed");
       return NextResponse.json(
         {
           success: false,
@@ -130,21 +113,18 @@ export async function POST(req: NextRequest) {
     }
 
     // ── Duplicate check ────────────────────────────────────────────────────
-    const existing = await Submission.findOne({
-      assignment: assignmentId,
-      student: auth.userId,
-    });
-
-    console.log(
-      "[SUBMISSION DEBUG] existing submission:",
-      existing ? { status: existing.status, _id: existing._id } : null,
-    );
+    const [existing] = await db
+      .select()
+      .from(submissions)
+      .where(
+        and(
+          eq(submissions.assignmentId, assignmentId),
+          eq(submissions.studentId, auth.userId),
+        ),
+      )
+      .limit(1);
 
     if (existing && existing.status !== "returned") {
-      console.log(
-        "[SUBMISSION DEBUG] BLOCKED — duplicate submission, status:",
-        existing.status,
-      );
       return NextResponse.json(
         {
           success: false,
@@ -198,7 +178,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ── Create or replace submission ───────────────────────────────────────
-    let submission;
+    let submission: typeof submissions.$inferSelect;
 
     if (existing && existing.status === "returned") {
       if (existing.filePath) {
@@ -208,57 +188,54 @@ export async function POST(req: NextRequest) {
           if (e.code !== "ENOENT") console.warn("[SUB FILE DELETE]", e.message);
         }
       }
-      existing.submittedAt = now;
-      existing.fileUrl = fileUrl;
-      existing.filePath = filePath;
-      existing.fileName = fileName;
-      existing.fileSize = fileSize;
-      existing.note = note;
-      existing.status = "submitted";
-      existing.score = null;
-      existing.feedback = null;
-      existing.isLate = isLate;
-      submission = await existing.save();
+      [submission] = await db
+        .update(submissions)
+        .set({
+          submittedAt: now,
+          fileUrl,
+          filePath,
+          fileName,
+          fileSize,
+          note,
+          status: "submitted",
+          score: null,
+          feedback: null,
+          isLate,
+        })
+        .where(eq(submissions.id, existing.id))
+        .returning();
     } else {
-      submission = await Submission.create({
-        assignment: assignmentId,
-        student: auth.userId,
-        submittedAt: now,
-        fileUrl,
-        filePath,
-        fileName,
-        fileSize,
-        note,
-        status: "submitted",
-        score: null,
-        feedback: null,
-        isLate,
-      });
+      [submission] = await db
+        .insert(submissions)
+        .values({
+          assignmentId,
+          studentId: auth.userId,
+          submittedAt: now,
+          fileUrl,
+          filePath,
+          fileName,
+          fileSize,
+          note,
+          status: "submitted",
+          score: null,
+          feedback: null,
+          isLate,
+        })
+        .returning();
 
-      Assignment.findByIdAndUpdate(assignmentId, {
-        $inc: { submissionsCount: 1 },
-      })
-        .exec()
+      db.update(assignments)
+        .set({ submissionsCount: sql`${assignments.submissionsCount} + 1` })
+        .where(eq(assignments.id, assignmentId))
         .catch(() => {});
     }
+
+    const { filePath: _fp, ...safe } = submission;
 
     return NextResponse.json(
       {
         success: true,
         message: "Assignment submitted successfully.",
-        data: {
-          _id: submission._id,
-          assignment: submission.assignment,
-          submittedAt: submission.submittedAt,
-          fileUrl: submission.fileUrl,
-          fileName: submission.fileName,
-          fileSize: submission.fileSize,
-          note: submission.note,
-          status: submission.status,
-          score: submission.score,
-          feedback: submission.feedback,
-          isLate: submission.isLate,
-        },
+        data: toLegacy(safe),
       },
       { status: 201 },
     );

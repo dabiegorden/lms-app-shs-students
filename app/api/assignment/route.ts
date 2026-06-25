@@ -1,9 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { connectDB } from "@/lib/db";
+import { and, asc, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import { assignments } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Assignment from "@/models/Assignment";
+import { toLegacy, toLegacyList } from "@/lib/serialize";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
@@ -20,14 +22,6 @@ function requireInstructor(req: NextRequest) {
 }
 
 // ─── GET /api/assignment ──────────────────────────────────────────────────────
-// Query params:
-//   search     – free-text (title / subject / topic / instructions)
-//   subject    – exact match (case-insensitive)
-//   classLevel – "SHS 1" | "SHS 2" | "SHS 3" | "All"
-//   status     – "draft" | "published" | "closed"
-//   page       – default 1
-//   limit      – default 12, max 50
-//   sort       – "newest" | "oldest" | "title" | "dueDate"
 export async function GET(req: NextRequest) {
   try {
     const auth = requireInstructor(req);
@@ -37,8 +31,6 @@ export async function GET(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search")?.trim() ?? "";
@@ -51,40 +43,55 @@ export async function GET(req: NextRequest) {
       50,
       Math.max(1, parseInt(searchParams.get("limit") ?? "12", 10)),
     );
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    // ── Query ──────────────────────────────────────────────────────────────
-    const query: Record<string, any> = { instructor: auth.userId };
+    const conditions = [eq(assignments.instructorId, auth.userId)];
+    if (search) {
+      conditions.push(
+        or(
+          ilike(assignments.title, `%${search}%`),
+          ilike(assignments.subject, `%${search}%`),
+          ilike(assignments.topic, `%${search}%`),
+          ilike(assignments.instructions, `%${search}%`),
+        )!,
+      );
+    }
+    if (subject) conditions.push(ilike(assignments.subject, `%${subject}%`));
+    if (classLevel)
+      conditions.push(eq(assignments.classLevel, classLevel as any));
+    if (status) conditions.push(eq(assignments.status, status as any));
 
-    if (search) query.$text = { $search: search };
-    if (subject) query.subject = { $regex: subject, $options: "i" };
-    if (classLevel) query.classLevel = classLevel;
-    if (status) query.status = status;
+    const whereClause = and(...conditions);
 
-    // ── Sort ───────────────────────────────────────────────────────────────
-    const sortMap: Record<string, Record<string, 1 | -1>> = {
-      newest: { createdAt: -1 },
-      oldest: { createdAt: 1 },
-      title: { title: 1 },
-      dueDate: { dueDate: 1 },
+    const orderByMap: Record<string, any> = {
+      newest: desc(assignments.createdAt),
+      oldest: asc(assignments.createdAt),
+      title: asc(assignments.title),
+      dueDate: asc(assignments.dueDate),
     };
-    const sortOption = sortMap[sort] ?? sortMap.newest;
+    const orderBy = orderByMap[sort] ?? orderByMap.newest;
 
-    // ── Execute ────────────────────────────────────────────────────────────
-    const [assignments, total] = await Promise.all([
-      Assignment.find(query)
-        .sort(sortOption)
-        .skip(skip)
+    const [fullRows, totalResult] = await Promise.all([
+      db
+        .select()
+        .from(assignments)
+        .where(whereClause)
+        .orderBy(orderBy)
         .limit(limit)
-        .select("-filePath") // never expose server path
-        .lean(),
-      Assignment.countDocuments(query),
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(assignments)
+        .where(whereClause),
     ]);
+
+    const rows = fullRows.map(({ filePath, ...rest }) => rest);
+    const total = totalResult[0]?.count ?? 0;
 
     return NextResponse.json(
       {
         success: true,
-        data: assignments,
+        data: toLegacyList(rows),
         pagination: {
           total,
           page,
@@ -106,17 +113,6 @@ export async function GET(req: NextRequest) {
 }
 
 // ─── POST /api/assignment ─────────────────────────────────────────────────────
-// Body: multipart/form-data
-//   title              (required)
-//   subject            (required)
-//   dueDate            (required)  ISO string
-//   instructions       (optional)
-//   topic              (optional)
-//   classLevel         (optional, default "All")
-//   totalMarks         (optional, default 100)
-//   allowLateSubmission (optional, "true" | "false")
-//   status             (optional, default "published")
-//   file               (optional) PDF only, max 20 MB
 export async function POST(req: NextRequest) {
   try {
     const auth = requireInstructor(req);
@@ -126,8 +122,6 @@ export async function POST(req: NextRequest) {
         { status: 401 },
       );
     }
-
-    await connectDB();
 
     const formData = await req.formData();
 
@@ -149,7 +143,6 @@ export async function POST(req: NextRequest) {
       (formData.get("status") as string | null)?.trim() || "published";
     const file = formData.get("file") as File | null;
 
-    // ── Validate required text fields ──────────────────────────────────────
     if (!title || !subject) {
       return NextResponse.json(
         { success: false, message: "Title and subject are required." },
@@ -163,7 +156,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Handle optional file ───────────────────────────────────────────────
     let fileUrl: string | null = null;
     let filePath: string | null = null;
     let fileName: string | null = null;
@@ -190,58 +182,43 @@ export async function POST(req: NextRequest) {
         .replace(/\s+/g, "_");
       const uniqueFileName = `${Date.now()}-${sanitisedName}`;
       const absolutePath = path.join(UPLOAD_DIR, uniqueFileName);
-      const publicUrl = `${UPLOAD_URL_BASE}/${uniqueFileName}`;
 
       const arrayBuffer = await file.arrayBuffer();
       await fs.writeFile(absolutePath, new Uint8Array(arrayBuffer));
 
-      fileUrl = publicUrl;
+      fileUrl = `${UPLOAD_URL_BASE}/${uniqueFileName}`;
       filePath = absolutePath;
       fileName = file.name;
       fileSize = file.size;
     }
 
-    // ── Save to DB ─────────────────────────────────────────────────────────
-    const assignment = await Assignment.create({
-      title,
-      instructions,
-      subject,
-      topic,
-      classLevel,
-      dueDate: new Date(dueDateRaw),
-      totalMarks: isNaN(totalMarks) ? 100 : totalMarks,
-      allowLateSubmission,
-      status,
-      fileUrl,
-      filePath,
-      fileName,
-      fileSize,
-      instructor: auth.userId,
-    });
+    const [assignment] = await db
+      .insert(assignments)
+      .values({
+        title,
+        instructions,
+        subject,
+        topic,
+        classLevel: classLevel as any,
+        dueDate: new Date(dueDateRaw),
+        totalMarks: isNaN(totalMarks) ? 100 : totalMarks,
+        allowLateSubmission,
+        status: status as any,
+        fileUrl,
+        filePath,
+        fileName,
+        fileSize,
+        instructorId: auth.userId,
+      })
+      .returning();
+
+    const { filePath: _fp, ...safe } = assignment;
 
     return NextResponse.json(
       {
         success: true,
         message: "Assignment created successfully.",
-        data: {
-          _id: assignment._id,
-          title: assignment.title,
-          subject: assignment.subject,
-          topic: assignment.topic,
-          classLevel: assignment.classLevel,
-          instructions: assignment.instructions,
-          dueDate: assignment.dueDate,
-          totalMarks: assignment.totalMarks,
-          allowLateSubmission: assignment.allowLateSubmission,
-          status: assignment.status,
-          fileUrl: assignment.fileUrl,
-          fileName: assignment.fileName,
-          fileSize: assignment.fileSize,
-          views: assignment.views,
-          submissionsCount: assignment.submissionsCount,
-          createdAt: assignment.createdAt,
-          updatedAt: assignment.updatedAt,
-        },
+        data: toLegacy(safe),
       },
       { status: 201 },
     );

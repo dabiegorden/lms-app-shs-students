@@ -1,12 +1,14 @@
-import mongoose from "mongoose";
-import Performance from "@/models/Performance";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { performances } from "@/src/schema";
+import type { ActivityRecord, SubjectStats } from "@/src/schema";
 
 interface SyncActivityInput {
   type: "quiz" | "assignment";
-  refId: mongoose.Types.ObjectId | string;
-  submissionId: mongoose.Types.ObjectId | string;
-  studentId: mongoose.Types.ObjectId | string;
-  instructorId: mongoose.Types.ObjectId | string;
+  refId: string;
+  submissionId: string;
+  studentId: string;
+  instructorId: string;
   title: string;
   subject: string;
   score: number;
@@ -16,13 +18,13 @@ interface SyncActivityInput {
 }
 
 /**
- * Upserts the Performance document for a (student, instructor) pair.
+ * Upserts the Performance record for a (student, instructor) pair.
  * Call this after:
  *   - A quiz is auto-graded (MCQ-only) on submission
  *   - An instructor grades a theory quiz submission
  *   - An instructor grades an assignment submission
  *
- * It is designed to be fire-and-forget safe — wrap in try/catch at call site.
+ * Fire-and-forget safe — wrap in try/catch at the call site.
  */
 export async function syncPerformance(input: SyncActivityInput): Promise<void> {
   const {
@@ -42,110 +44,91 @@ export async function syncPerformance(input: SyncActivityInput): Promise<void> {
   const percentage =
     maxScore > 0 ? Math.round((score / maxScore) * 10000) / 100 : 0;
 
-  const studentObjId =
-    typeof studentId === "string"
-      ? new mongoose.Types.ObjectId(studentId)
-      : studentId;
-  const instructorObjId =
-    typeof instructorId === "string"
-      ? new mongoose.Types.ObjectId(instructorId)
-      : instructorId;
+  // ── Fetch the existing performance record (if any) ─────────────────────
+  const [existing] = await db
+    .select()
+    .from(performances)
+    .where(
+      and(
+        eq(performances.studentId, studentId),
+        eq(performances.instructorId, instructorId),
+      ),
+    )
+    .limit(1);
 
-  // ── Fetch or create the performance record ─────────────────────────────
-  let perf = await Performance.findOne({
-    student: studentObjId,
-    instructor: instructorObjId,
-  });
+  const recentActivity: ActivityRecord[] = existing
+    ? [...existing.recentActivity]
+    : [];
 
-  if (!perf) {
-    perf = new Performance({
-      student: studentObjId,
-      instructor: instructorObjId,
-    });
-  }
-
-  // ── Check if this submission was already recorded (prevent duplicates) ──
-  const existingIdx = perf.recentActivity.findIndex(
-    (a) => String(a.submissionId) === String(submissionId),
-  );
-
-  const activityRecord = {
+  // ── Insert or replace the activity record (idempotent per submission) ──
+  const activityRecord: ActivityRecord = {
     type,
-    refId: new mongoose.Types.ObjectId(String(refId)),
-    submissionId: new mongoose.Types.ObjectId(String(submissionId)),
+    refId: String(refId),
+    submissionId: String(submissionId),
     title,
     subject,
     score,
     maxScore,
     percentage,
-    submittedAt,
-    gradedAt,
+    submittedAt: new Date(submittedAt).toISOString(),
+    gradedAt: gradedAt ? new Date(gradedAt).toISOString() : null,
   };
 
+  const existingIdx = recentActivity.findIndex(
+    (a) => String(a.submissionId) === String(submissionId),
+  );
+
+  let activities = recentActivity;
   if (existingIdx >= 0) {
-    // Update existing record (e.g., theory answers graded later)
-    perf.recentActivity[existingIdx] = activityRecord;
+    activities[existingIdx] = activityRecord;
   } else {
-    // New activity — push and cap to 100 most recent
-    perf.recentActivity.push(activityRecord);
-    if (perf.recentActivity.length > 100) {
-      perf.recentActivity = perf.recentActivity.slice(-100);
-    }
+    activities.push(activityRecord);
+    if (activities.length > 100) activities = activities.slice(-100);
   }
 
   // ── Recompute all aggregates from the full activity log ─────────────────
-  const allActivities = perf.recentActivity;
-
-  perf.totalActivities = allActivities.length;
-  perf.totalScore = allActivities.reduce((s, a) => s + a.score, 0);
-  perf.totalMaxScore = allActivities.reduce((s, a) => s + a.maxScore, 0);
-  perf.overallPercentage =
-    perf.totalMaxScore > 0
-      ? Math.round((perf.totalScore / perf.totalMaxScore) * 10000) / 100
+  const totalActivities = activities.length;
+  const totalScore = activities.reduce((s, a) => s + a.score, 0);
+  const totalMaxScore = activities.reduce((s, a) => s + a.maxScore, 0);
+  const overallPercentage =
+    totalMaxScore > 0
+      ? Math.round((totalScore / totalMaxScore) * 10000) / 100
       : 0;
 
-  // Quiz aggregates
-  const quizActivities = allActivities.filter((a) => a.type === "quiz");
-  perf.quizCount = quizActivities.length;
-  perf.quizTotalScore = quizActivities.reduce((s, a) => s + a.score, 0);
-  perf.quizTotalMaxScore = quizActivities.reduce((s, a) => s + a.maxScore, 0);
-  perf.quizAveragePercentage =
-    perf.quizTotalMaxScore > 0
-      ? Math.round((perf.quizTotalScore / perf.quizTotalMaxScore) * 10000) / 100
+  const quizActivities = activities.filter((a) => a.type === "quiz");
+  const quizCount = quizActivities.length;
+  const quizTotalScore = quizActivities.reduce((s, a) => s + a.score, 0);
+  const quizTotalMaxScore = quizActivities.reduce((s, a) => s + a.maxScore, 0);
+  const quizAveragePercentage =
+    quizTotalMaxScore > 0
+      ? Math.round((quizTotalScore / quizTotalMaxScore) * 10000) / 100
       : 0;
 
-  // Assignment aggregates
-  const assignmentActivities = allActivities.filter(
+  const assignmentActivities = activities.filter(
     (a) => a.type === "assignment",
   );
-  perf.assignmentCount = assignmentActivities.length;
-  perf.assignmentTotalScore = assignmentActivities.reduce(
+  const assignmentCount = assignmentActivities.length;
+  const assignmentTotalScore = assignmentActivities.reduce(
     (s, a) => s + a.score,
     0,
   );
-  perf.assignmentTotalMaxScore = assignmentActivities.reduce(
+  const assignmentTotalMaxScore = assignmentActivities.reduce(
     (s, a) => s + a.maxScore,
     0,
   );
-  perf.assignmentAveragePercentage =
-    perf.assignmentTotalMaxScore > 0
-      ? Math.round(
-          (perf.assignmentTotalScore / perf.assignmentTotalMaxScore) * 10000,
-        ) / 100
+  const assignmentAveragePercentage =
+    assignmentTotalMaxScore > 0
+      ? Math.round((assignmentTotalScore / assignmentTotalMaxScore) * 10000) /
+        100
       : 0;
 
   // ── Subject breakdown ──────────────────────────────────────────────────
   const subjectMap = new Map<
     string,
-    {
-      quizScore: number;
-      quizMax: number;
-      assignScore: number;
-      assignMax: number;
-    }
+    { quizScore: number; quizMax: number; assignScore: number; assignMax: number }
   >();
 
-  for (const a of allActivities) {
+  for (const a of activities) {
     if (!subjectMap.has(a.subject)) {
       subjectMap.set(a.subject, {
         quizScore: 0,
@@ -164,30 +147,60 @@ export async function syncPerformance(input: SyncActivityInput): Promise<void> {
     }
   }
 
-  perf.subjectStats = Array.from(subjectMap.entries()).map(([subj, data]) => {
-    const totalScore = data.quizScore + data.assignScore;
-    const totalMax = data.quizMax + data.assignMax;
-    const quizActivitiesForSubj = quizActivities.filter(
-      (a) => a.subject === subj,
-    ).length;
-    const assignActivitiesForSubj = assignmentActivities.filter(
-      (a) => a.subject === subj,
-    ).length;
-    return {
-      subject: subj,
-      totalActivities: quizActivitiesForSubj + assignActivitiesForSubj,
-      totalScore,
-      totalMaxScore: totalMax,
-      averagePercentage:
-        totalMax > 0 ? Math.round((totalScore / totalMax) * 10000) / 100 : 0,
-      quizCount: quizActivitiesForSubj,
-      assignmentCount: assignActivitiesForSubj,
-    };
-  });
-
-  perf.lastActivityAt = new Date(
-    Math.max(...allActivities.map((a) => new Date(a.submittedAt).getTime())),
+  const subjectStats: SubjectStats[] = Array.from(subjectMap.entries()).map(
+    ([subj, data]) => {
+      const subjTotalScore = data.quizScore + data.assignScore;
+      const subjTotalMax = data.quizMax + data.assignMax;
+      const quizForSubj = quizActivities.filter(
+        (a) => a.subject === subj,
+      ).length;
+      const assignForSubj = assignmentActivities.filter(
+        (a) => a.subject === subj,
+      ).length;
+      return {
+        subject: subj,
+        totalActivities: quizForSubj + assignForSubj,
+        totalScore: subjTotalScore,
+        totalMaxScore: subjTotalMax,
+        averagePercentage:
+          subjTotalMax > 0
+            ? Math.round((subjTotalScore / subjTotalMax) * 10000) / 100
+            : 0,
+        quizCount: quizForSubj,
+        assignmentCount: assignForSubj,
+      };
+    },
   );
 
-  await perf.save();
+  const lastActivityAt = new Date(
+    Math.max(...activities.map((a) => new Date(a.submittedAt).getTime())),
+  );
+
+  const values = {
+    studentId,
+    instructorId,
+    totalActivities,
+    totalScore,
+    totalMaxScore,
+    overallPercentage,
+    quizCount,
+    quizTotalScore,
+    quizTotalMaxScore,
+    quizAveragePercentage,
+    assignmentCount,
+    assignmentTotalScore,
+    assignmentTotalMaxScore,
+    assignmentAveragePercentage,
+    subjectStats,
+    recentActivity: activities,
+    lastActivityAt,
+  };
+
+  await db
+    .insert(performances)
+    .values(values)
+    .onConflictDoUpdate({
+      target: [performances.studentId, performances.instructorId],
+      set: values,
+    });
 }

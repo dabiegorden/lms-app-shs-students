@@ -1,9 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { connectDB } from "@/lib/db";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { assignments } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Assignment from "@/models/Assignment";
+import { toLegacy } from "@/lib/serialize";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
@@ -19,20 +21,13 @@ function requireInstructor(req: NextRequest) {
   return user;
 }
 
-// ─── File deletion helper ─────────────────────────────────────────────────────
 async function deleteFileFromDisk(filePath: string) {
   try {
     await fs.unlink(filePath);
   } catch (err: any) {
-    if (err.code !== "ENOENT") {
-      console.warn("[FILE DELETE WARN]", err.message);
-    }
+    if (err.code !== "ENOENT") console.warn("[FILE DELETE WARN]", err.message);
   }
 }
-
-// ─── Shared safe-select (never leak filePath) ─────────────────────────────────
-const PUBLIC_SELECT =
-  "_id title instructions subject topic classLevel dueDate totalMarks allowLateSubmission status fileUrl fileName fileSize views submissionsCount instructor createdAt updatedAt";
 
 // ─── GET /api/assignment/[id] ─────────────────────────────────────────────────
 export async function GET(
@@ -49,12 +44,14 @@ export async function GET(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    const assignment = await Assignment.findOne({
-      _id: id,
-      instructor: auth.userId,
-    }).select(PUBLIC_SELECT);
+    const [assignment] = await db
+      .select()
+      .from(assignments)
+      .where(
+        and(eq(assignments.id, id), eq(assignments.instructorId, auth.userId)),
+      )
+      .limit(1);
 
     if (!assignment) {
       return NextResponse.json(
@@ -63,8 +60,9 @@ export async function GET(
       );
     }
 
+    const { filePath: _fp, ...safe } = assignment;
     return NextResponse.json(
-      { success: true, data: assignment },
+      { success: true, data: toLegacy(safe) },
       { status: 200 },
     );
   } catch (error: any) {
@@ -77,10 +75,6 @@ export async function GET(
 }
 
 // ─── PATCH /api/assignment/[id] ───────────────────────────────────────────────
-// Body: multipart/form-data — all fields optional
-// If a new `file` is provided, the old one is deleted from disk first.
-// Send file=<empty> or omit entirely to keep the existing attachment.
-// Send removeFile="true" to detach the current PDF without uploading a new one.
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -95,12 +89,14 @@ export async function PATCH(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    const assignment = await Assignment.findOne({
-      _id: id,
-      instructor: auth.userId,
-    });
+    const [assignment] = await db
+      .select()
+      .from(assignments)
+      .where(
+        and(eq(assignments.id, id), eq(assignments.instructorId, auth.userId)),
+      )
+      .limit(1);
 
     if (!assignment) {
       return NextResponse.json(
@@ -125,30 +121,31 @@ export async function PATCH(
     const file = formData.get("file") as File | null;
     const removeFile = formData.get("removeFile") === "true";
 
-    // ── Update text fields if provided ─────────────────────────────────────
-    if (title?.trim()) assignment.title = title.trim();
-    if (subject?.trim()) assignment.subject = subject.trim();
+    const updates: Partial<typeof assignments.$inferInsert> = {};
+
+    if (title?.trim()) updates.title = title.trim();
+    if (subject?.trim()) updates.subject = subject.trim();
     if (dueDateRaw?.trim() && !isNaN(Date.parse(dueDateRaw)))
-      assignment.dueDate = new Date(dueDateRaw);
-    if (instructions !== null) assignment.instructions = instructions.trim();
-    if (topic !== null) assignment.topic = topic.trim();
-    if (classLevel?.trim()) assignment.classLevel = classLevel.trim() as any;
+      updates.dueDate = new Date(dueDateRaw);
+    if (instructions !== null) updates.instructions = instructions.trim();
+    if (topic !== null) updates.topic = topic.trim();
+    if (classLevel?.trim()) updates.classLevel = classLevel.trim() as any;
     if (totalMarksRaw !== null) {
       const n = parseInt(totalMarksRaw, 10);
-      if (!isNaN(n) && n > 0) assignment.totalMarks = n;
+      if (!isNaN(n) && n > 0) updates.totalMarks = n;
     }
     if (allowLateSubmissionRaw !== null) {
-      assignment.allowLateSubmission = allowLateSubmissionRaw === "true";
+      updates.allowLateSubmission = allowLateSubmissionRaw === "true";
     }
-    if (status?.trim()) assignment.status = status.trim() as any;
+    if (status?.trim()) updates.status = status.trim() as any;
 
     // ── Remove attachment without replacement ──────────────────────────────
     if (removeFile && (!file || file.size === 0)) {
       if (assignment.filePath) await deleteFileFromDisk(assignment.filePath);
-      assignment.fileUrl = null;
-      assignment.filePath = null;
-      assignment.fileName = null;
-      assignment.fileSize = null;
+      updates.fileUrl = null;
+      updates.filePath = null;
+      updates.fileName = null;
+      updates.fileSize = null;
     }
 
     // ── Replace PDF if a new one was submitted ─────────────────────────────
@@ -166,7 +163,6 @@ export async function PATCH(
         );
       }
 
-      // Delete old file first
       if (assignment.filePath) await deleteFileFromDisk(assignment.filePath);
 
       await fs.mkdir(UPLOAD_DIR, { recursive: true });
@@ -176,42 +172,29 @@ export async function PATCH(
         .replace(/\s+/g, "_");
       const uniqueFileName = `${Date.now()}-${sanitisedName}`;
       const absolutePath = path.join(UPLOAD_DIR, uniqueFileName);
-      const publicUrl = `${UPLOAD_URL_BASE}/${uniqueFileName}`;
 
       const arrayBuffer = await file.arrayBuffer();
       await fs.writeFile(absolutePath, new Uint8Array(arrayBuffer));
 
-      assignment.fileUrl = publicUrl;
-      assignment.filePath = absolutePath;
-      assignment.fileName = file.name;
-      assignment.fileSize = file.size;
+      updates.fileUrl = `${UPLOAD_URL_BASE}/${uniqueFileName}`;
+      updates.filePath = absolutePath;
+      updates.fileName = file.name;
+      updates.fileSize = file.size;
     }
 
-    await assignment.save();
+    const [updated] = await db
+      .update(assignments)
+      .set(updates)
+      .where(eq(assignments.id, assignment.id))
+      .returning();
+
+    const { filePath: _fp, ...safe } = updated;
 
     return NextResponse.json(
       {
         success: true,
         message: "Assignment updated successfully.",
-        data: {
-          _id: assignment._id,
-          title: assignment.title,
-          subject: assignment.subject,
-          topic: assignment.topic,
-          classLevel: assignment.classLevel,
-          instructions: assignment.instructions,
-          dueDate: assignment.dueDate,
-          totalMarks: assignment.totalMarks,
-          allowLateSubmission: assignment.allowLateSubmission,
-          status: assignment.status,
-          fileUrl: assignment.fileUrl,
-          fileName: assignment.fileName,
-          fileSize: assignment.fileSize,
-          views: assignment.views,
-          submissionsCount: assignment.submissionsCount,
-          createdAt: assignment.createdAt,
-          updatedAt: assignment.updatedAt,
-        },
+        data: toLegacy(safe),
       },
       { status: 200 },
     );
@@ -239,12 +222,14 @@ export async function DELETE(
     }
 
     const { id } = await params;
-    await connectDB();
 
-    const assignment = await Assignment.findOne({
-      _id: id,
-      instructor: auth.userId,
-    });
+    const [assignment] = await db
+      .select()
+      .from(assignments)
+      .where(
+        and(eq(assignments.id, id), eq(assignments.instructorId, auth.userId)),
+      )
+      .limit(1);
 
     if (!assignment) {
       return NextResponse.json(
@@ -253,10 +238,9 @@ export async function DELETE(
       );
     }
 
-    // Delete attached PDF from disk if present
     if (assignment.filePath) await deleteFileFromDisk(assignment.filePath);
 
-    await Assignment.deleteOne({ _id: id });
+    await db.delete(assignments).where(eq(assignments.id, id));
 
     return NextResponse.json(
       { success: true, message: "Assignment deleted successfully." },

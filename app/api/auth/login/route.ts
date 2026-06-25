@@ -1,13 +1,12 @@
 import { type NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
-import { connectDB } from "@/lib/db";
-import User from "@/models/User";
+import { eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { users } from "@/src/schema";
 import { generateToken } from "@/lib/jwt";
 
 export async function POST(req: NextRequest) {
   try {
-    await connectDB();
-
     const body = await req.json();
     const { email, password } = body;
 
@@ -22,7 +21,12 @@ export async function POST(req: NextRequest) {
     // ── Find user by email ─────────────────────────────────────────────────
     // Intentionally use the same generic error for both "not found"
     // and "wrong password" to avoid user enumeration attacks.
-    const user = await User.findOne({ email: email.toLowerCase() });
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.email, email.toLowerCase().trim()))
+      .limit(1);
+
     if (!user) {
       return NextResponse.json(
         { success: false, message: "Invalid email or password." },
@@ -41,14 +45,15 @@ export async function POST(req: NextRequest) {
 
     // ── Generate JWT ───────────────────────────────────────────────────────
     const token = generateToken({
-      userId: user._id.toString(),
+      userId: user.id,
       email: user.email,
       role: user.role,
     });
 
     // ── Build safe user payload (never send password) ──────────────────────
     const userPayload = {
-      id: user._id,
+      id: user.id,
+      _id: user.id,
       name: user.name,
       email: user.email,
       role: user.role,

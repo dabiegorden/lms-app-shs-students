@@ -1,7 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { quizzes } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Quiz from "@/models/Quiz";
+import { isUuid } from "@/lib/validation";
+import { toLegacy } from "@/lib/serialize";
 
 export async function GET(
   req: NextRequest,
@@ -24,20 +27,18 @@ export async function GET(
 
     const { id } = await params;
 
-    // Guard: reject obviously invalid IDs before hitting MongoDB
-    if (!id || id === "undefined" || !id.match(/^[a-f\d]{24}$/i)) {
+    if (!isUuid(id)) {
       return NextResponse.json(
-        { success: false, message: "Invalid course ID." },
+        { success: false, message: "Invalid quiz ID." },
         { status: 400 },
       );
     }
-    await connectDB();
 
-    const quiz = await Quiz.findOne({ _id: id, status: "published" })
-      .select(
-        "_id title description subject topic classLevel dueDate totalMarks durationMinutes allowLateSubmission shuffleQuestions status questions._id questions.type questions.text questions.marks questions.options questions.order",
-      )
-      .lean();
+    const [quiz] = await db
+      .select()
+      .from(quizzes)
+      .where(and(eq(quizzes.id, id), eq(quizzes.status, "published")))
+      .limit(1);
 
     if (!quiz) {
       return NextResponse.json(
@@ -46,7 +47,22 @@ export async function GET(
       );
     }
 
-    return NextResponse.json({ success: true, data: quiz }, { status: 200 });
+    // Strip instructor + answer-bearing fields (correctOption / modelAnswer)
+    const { instructorId, questions, ...rest } = quiz;
+    const safeQuestions = questions.map((q) => ({
+      id: q.id,
+      _id: q.id,
+      type: q.type,
+      text: q.text,
+      marks: q.marks,
+      options: q.options,
+      order: q.order,
+    }));
+
+    return NextResponse.json(
+      { success: true, data: { ...toLegacy(rest), questions: safeQuestions } },
+      { status: 200 },
+    );
   } catch (error: any) {
     console.error("[STUDENT GET QUIZ ERROR]", error);
     return NextResponse.json(

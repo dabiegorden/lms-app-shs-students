@@ -1,10 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { courses, courseEnrollments } from "@/src/schema";
+import type { LessonProgress } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import Course from "@/models/Course";
-import CourseEnrollment from "@/models/Courseenrollment";
-
-// ─── FILE: /api/student/courses/[id]/progress/route.ts ───────────────────────
+import { isUuid } from "@/lib/validation";
+import { toLegacy } from "@/lib/serialize";
 
 function requireStudent(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
@@ -31,8 +32,7 @@ export async function POST(
 
     const { id } = await params;
 
-    // Guard: reject obviously invalid IDs before hitting MongoDB
-    if (!id || id === "undefined" || !id.match(/^[a-f\d]{24}$/i)) {
+    if (!isUuid(id)) {
       return NextResponse.json(
         { success: false, message: "Invalid course ID." },
         { status: 400 },
@@ -48,12 +48,16 @@ export async function POST(
       );
     }
 
-    await connectDB();
-
-    const enrollment = await CourseEnrollment.findOne({
-      course: id,
-      student: auth.userId,
-    });
+    const [enrollment] = await db
+      .select()
+      .from(courseEnrollments)
+      .where(
+        and(
+          eq(courseEnrollments.courseId, id),
+          eq(courseEnrollments.studentId, auth.userId),
+        ),
+      )
+      .limit(1);
 
     if (!enrollment) {
       return NextResponse.json(
@@ -63,76 +67,83 @@ export async function POST(
     }
 
     // Resolve sectionId by looking up the lesson in the course structure
-    const course = await Course.findById(id)
-      .select("sections certificateEnabled")
-      .lean();
-    let sectionId: any = null;
-    for (const sec of (course as any)?.sections ?? []) {
-      const lesson = sec.lessons.find(
-        (l: any) => l._id.toString() === lessonId,
-      );
+    const [course] = await db
+      .select({
+        sections: courses.sections,
+        certificateEnabled: courses.certificateEnabled,
+      })
+      .from(courses)
+      .where(eq(courses.id, id))
+      .limit(1);
+
+    let sectionId: string | null = null;
+    for (const sec of course?.sections ?? []) {
+      const lesson = sec.lessons.find((l) => l.id === lessonId);
       if (lesson) {
-        sectionId = sec._id;
+        sectionId = sec.id;
         break;
       }
     }
 
-    // Update or insert progress entry
-    const idx = enrollment.lessonProgress.findIndex(
-      (lp: any) => lp.lessonId.toString() === lessonId,
-    );
+    // Work on a mutable copy of the progress array
+    const lessonProgress: LessonProgress[] = [...enrollment.lessonProgress];
+    const idx = lessonProgress.findIndex((lp) => lp.lessonId === lessonId);
 
     if (idx === -1) {
-      enrollment.lessonProgress.push({
+      lessonProgress.push({
         lessonId,
-        sectionId,
+        sectionId: sectionId ?? "",
         isCompleted,
-        completedAt: isCompleted ? new Date() : null,
+        completedAt: isCompleted ? new Date().toISOString() : null,
         watchedSeconds: watchedSeconds ?? 0,
-      } as any);
+      });
     } else {
-      if (isCompleted && !enrollment.lessonProgress[idx].isCompleted) {
-        enrollment.lessonProgress[idx].isCompleted = true;
-        enrollment.lessonProgress[idx].completedAt = new Date();
+      if (isCompleted && !lessonProgress[idx].isCompleted) {
+        lessonProgress[idx].isCompleted = true;
+        lessonProgress[idx].completedAt = new Date().toISOString();
       }
       if (watchedSeconds !== undefined) {
-        enrollment.lessonProgress[idx].watchedSeconds = watchedSeconds;
+        lessonProgress[idx].watchedSeconds = watchedSeconds;
       }
     }
 
-    // Update resume pointer
-    enrollment.lastLessonId = lessonId as any;
-    enrollment.lastAccessedAt = new Date();
-
     // Recompute aggregate progress
     const totalLessons = enrollment.totalLessons || 1;
-    const completedCount = enrollment.lessonProgress.filter(
-      (lp: any) => lp.isCompleted,
-    ).length;
-    enrollment.completedLessons = completedCount;
-    enrollment.progressPercent = Math.min(
+    const completedCount = lessonProgress.filter((lp) => lp.isCompleted).length;
+    const progressPercent = Math.min(
       100,
       Math.round((completedCount / totalLessons) * 100),
     );
 
-    // Mark course complete and issue certificate when 100% reached
-    if (enrollment.progressPercent >= 100 && !enrollment.isCompleted) {
-      enrollment.isCompleted = true;
-      enrollment.completedAt = new Date();
+    const updates: Partial<typeof courseEnrollments.$inferInsert> = {
+      lessonProgress,
+      lastLessonId: lessonId,
+      lastAccessedAt: new Date(),
+      completedLessons: completedCount,
+      progressPercent,
+    };
 
-      if ((course as any)?.certificateEnabled) {
-        enrollment.certificateId = `CERT-${Date.now()}-${auth.userId
-          .toString()
+    // Mark course complete and issue certificate when 100% reached
+    if (progressPercent >= 100 && !enrollment.isCompleted) {
+      updates.isCompleted = true;
+      updates.completedAt = new Date();
+
+      if (course?.certificateEnabled) {
+        updates.certificateId = `CERT-${Date.now()}-${auth.userId
           .slice(-6)
           .toUpperCase()}`;
-        enrollment.certificateIssuedAt = new Date();
+        updates.certificateIssuedAt = new Date();
       }
     }
 
-    await enrollment.save();
+    const [updated] = await db
+      .update(courseEnrollments)
+      .set(updates)
+      .where(eq(courseEnrollments.id, enrollment.id))
+      .returning();
 
     return NextResponse.json(
-      { success: true, data: enrollment },
+      { success: true, data: toLegacy(updated) },
       { status: 200 },
     );
   } catch (error: any) {

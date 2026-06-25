@@ -1,7 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { desc, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { quizSubmissions } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import QuizSubmission from "@/models/Quizsubmission";
+import { toLegacyList } from "@/lib/serialize";
 
 export async function GET(req: NextRequest) {
   try {
@@ -19,14 +21,14 @@ export async function GET(req: NextRequest) {
         { status: 401 },
       );
 
-    await connectDB();
-
-    const submissions = await QuizSubmission.find({ student: authUser.userId })
-      .sort({ submittedAt: -1 })
-      .lean();
+    const rows = await db
+      .select()
+      .from(quizSubmissions)
+      .where(eq(quizSubmissions.studentId, authUser.userId))
+      .orderBy(desc(quizSubmissions.submittedAt));
 
     return NextResponse.json(
-      { success: true, data: submissions },
+      { success: true, data: toLegacyList(rows) },
       { status: 200 },
     );
   } catch (error: any) {

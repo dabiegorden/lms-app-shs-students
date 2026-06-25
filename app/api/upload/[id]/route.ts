@@ -1,16 +1,17 @@
 import { type NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { connectDB } from "@/lib/db";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { lectureNotes } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import LectureNote from "@/models/Lecturenote";
+import { toLegacy } from "@/lib/serialize";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads", "notes");
 const UPLOAD_URL_BASE = "/uploads/notes";
 
-// ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireInstructor(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
@@ -19,22 +20,18 @@ function requireInstructor(req: NextRequest) {
   return user;
 }
 
-// ─── File deletion helper ─────────────────────────────────────────────────────
 async function deleteFileFromDisk(filePath: string) {
   try {
     await fs.unlink(filePath);
   } catch (err: any) {
-    // File already gone — not a fatal error, just log it
-    if (err.code !== "ENOENT") {
-      console.warn("[FILE DELETE WARN]", err.message);
-    }
+    if (err.code !== "ENOENT") console.warn("[FILE DELETE WARN]", err.message);
   }
 }
 
-// ─── GET /api/notes/[id] ──────────────────────────────────────────────────────
+// ─── GET /api/upload/[id] ─────────────────────────────────────────────────────
 export async function GET(
   req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }, // Next.js v16: params is a Promise
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const auth = requireInstructor(req);
@@ -45,14 +42,15 @@ export async function GET(
       );
     }
 
-    const { id } = await params; // ← must be awaited in Next.js v16
+    const { id } = await params;
 
-    await connectDB();
-
-    const note = await LectureNote.findOne({
-      _id: id,
-      instructor: auth.userId, // instructors can only fetch their own notes
-    }).select("-filePath"); // never expose the server path
+    const [note] = await db
+      .select()
+      .from(lectureNotes)
+      .where(
+        and(eq(lectureNotes.id, id), eq(lectureNotes.instructorId, auth.userId)),
+      )
+      .limit(1);
 
     if (!note) {
       return NextResponse.json(
@@ -61,7 +59,11 @@ export async function GET(
       );
     }
 
-    return NextResponse.json({ success: true, data: note }, { status: 200 });
+    const { filePath: _fp, ...safe } = note;
+    return NextResponse.json(
+      { success: true, data: toLegacy(safe) },
+      { status: 200 },
+    );
   } catch (error: any) {
     console.error("[GET NOTE ERROR]", error);
     return NextResponse.json(
@@ -71,9 +73,7 @@ export async function GET(
   }
 }
 
-// ─── PATCH /api/notes/[id] ────────────────────────────────────────────────────
-// Updates metadata and/or replaces the PDF file.
-// Body: multipart/form-data — all fields optional except when replacing file.
+// ─── PATCH /api/upload/[id] ───────────────────────────────────────────────────
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -89,13 +89,14 @@ export async function PATCH(
 
     const { id } = await params;
 
-    await connectDB();
+    const [note] = await db
+      .select()
+      .from(lectureNotes)
+      .where(
+        and(eq(lectureNotes.id, id), eq(lectureNotes.instructorId, auth.userId)),
+      )
+      .limit(1);
 
-    // Fetch the full document (we need filePath for old-file deletion)
-    const note = await LectureNote.findOne({
-      _id: id,
-      instructor: auth.userId,
-    });
     if (!note) {
       return NextResponse.json(
         { success: false, message: "Note not found." },
@@ -111,16 +112,15 @@ export async function PATCH(
     const topic = formData.get("topic") as string | null;
     const classLevel = formData.get("classLevel") as string | null;
 
-    // ── Update text fields if provided ─────────────────────────────────────
-    if (title?.trim()) note.title = title.trim();
-    if (subject?.trim()) note.subject = subject.trim();
-    if (description !== null) note.description = description.trim();
-    if (topic !== null) note.topic = topic.trim();
-    if (classLevel?.trim()) note.classLevel = classLevel.trim() as any;
+    const updates: Partial<typeof lectureNotes.$inferInsert> = {};
 
-    // ── Replace PDF if a new one was submitted ─────────────────────────────
+    if (title?.trim()) updates.title = title.trim();
+    if (subject?.trim()) updates.subject = subject.trim();
+    if (description !== null) updates.description = description.trim();
+    if (topic !== null) updates.topic = topic.trim();
+    if (classLevel?.trim()) updates.classLevel = classLevel.trim() as any;
+
     if (file && file.size > 0) {
-      // Validate replacement file
       if (file.type !== "application/pdf") {
         return NextResponse.json(
           { success: false, message: "Only PDF files are accepted." },
@@ -134,12 +134,8 @@ export async function PATCH(
         );
       }
 
-      // Delete old file from disk before writing the replacement
-      if (note.filePath) {
-        await deleteFileFromDisk(note.filePath);
-      }
+      if (note.filePath) await deleteFileFromDisk(note.filePath);
 
-      // Write new file
       await fs.mkdir(UPLOAD_DIR, { recursive: true });
 
       const sanitisedName = file.name
@@ -147,38 +143,29 @@ export async function PATCH(
         .replace(/\s+/g, "_");
       const uniqueFileName = `${Date.now()}-${sanitisedName}`;
       const absolutePath = path.join(UPLOAD_DIR, uniqueFileName);
-      const publicUrl = `${UPLOAD_URL_BASE}/${uniqueFileName}`;
 
       const arrayBuffer = await file.arrayBuffer();
       await fs.writeFile(absolutePath, new Uint8Array(arrayBuffer));
 
-      note.fileUrl = publicUrl;
-      note.filePath = absolutePath;
-      note.fileName = file.name;
-      note.fileSize = file.size;
+      updates.fileUrl = `${UPLOAD_URL_BASE}/${uniqueFileName}`;
+      updates.filePath = absolutePath;
+      updates.fileName = file.name;
+      updates.fileSize = file.size;
     }
 
-    await note.save();
+    const [updated] = await db
+      .update(lectureNotes)
+      .set(updates)
+      .where(eq(lectureNotes.id, note.id))
+      .returning();
+
+    const { filePath: _fp, ...safe } = updated;
 
     return NextResponse.json(
       {
         success: true,
         message: "Note updated successfully.",
-        data: {
-          _id: note._id,
-          title: note.title,
-          subject: note.subject,
-          topic: note.topic,
-          classLevel: note.classLevel,
-          description: note.description,
-          fileUrl: note.fileUrl,
-          fileName: note.fileName,
-          fileSize: note.fileSize,
-          views: note.views,
-          downloads: note.downloads,
-          createdAt: note.createdAt,
-          updatedAt: note.updatedAt,
-        },
+        data: toLegacy(safe),
       },
       { status: 200 },
     );
@@ -191,8 +178,7 @@ export async function PATCH(
   }
 }
 
-// ─── DELETE /api/notes/[id] ───────────────────────────────────────────────────
-// Removes the note from DB and deletes the PDF from disk.
+// ─── DELETE /api/upload/[id] ──────────────────────────────────────────────────
 export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -208,12 +194,14 @@ export async function DELETE(
 
     const { id } = await params;
 
-    await connectDB();
+    const [note] = await db
+      .select()
+      .from(lectureNotes)
+      .where(
+        and(eq(lectureNotes.id, id), eq(lectureNotes.instructorId, auth.userId)),
+      )
+      .limit(1);
 
-    const note = await LectureNote.findOne({
-      _id: id,
-      instructor: auth.userId,
-    });
     if (!note) {
       return NextResponse.json(
         { success: false, message: "Note not found." },
@@ -221,13 +209,9 @@ export async function DELETE(
       );
     }
 
-    // ── Delete file from disk first ────────────────────────────────────────
-    if (note.filePath) {
-      await deleteFileFromDisk(note.filePath);
-    }
+    if (note.filePath) await deleteFileFromDisk(note.filePath);
 
-    // ── Remove DB record ───────────────────────────────────────────────────
-    await LectureNote.deleteOne({ _id: id });
+    await db.delete(lectureNotes).where(eq(lectureNotes.id, id));
 
     return NextResponse.json(
       { success: true, message: "Note deleted successfully." },

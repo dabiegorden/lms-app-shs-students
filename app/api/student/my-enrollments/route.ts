@@ -1,11 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { desc, eq } from "drizzle-orm";
+import { db } from "@/src/db";
+import { courseEnrollments } from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import CourseEnrollment from "@/models/Courseenrollment";
-
-// ─── FILE: /api/student/my-enrollments/route.ts ───────────────────────────────
-// GET /api/student/my-enrollments
-// Returns all course enrollments for the authenticated student.
+import { toLegacyList } from "@/lib/serialize";
 
 function requireStudent(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
@@ -15,6 +13,7 @@ function requireStudent(req: NextRequest) {
   return user;
 }
 
+// GET /api/student/my-enrollments
 export async function GET(req: NextRequest) {
   try {
     const auth = requireStudent(req);
@@ -25,14 +24,17 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    await connectDB();
-
-    const enrollments = await CourseEnrollment.find({ student: auth.userId })
-      .sort({ lastAccessedAt: -1, enrolledAt: -1 })
-      .lean();
+    const enrollments = await db
+      .select()
+      .from(courseEnrollments)
+      .where(eq(courseEnrollments.studentId, auth.userId))
+      .orderBy(
+        desc(courseEnrollments.lastAccessedAt),
+        desc(courseEnrollments.enrolledAt),
+      );
 
     return NextResponse.json(
-      { success: true, data: enrollments },
+      { success: true, data: toLegacyList(enrollments) },
       { status: 200 },
     );
   } catch (error: any) {

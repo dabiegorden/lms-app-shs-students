@@ -698,14 +698,14 @@ function SubmissionsDrawer({
                       <div className="flex items-start gap-3">
                         {/* Avatar */}
                         <div className="w-9 h-9 rounded-xl bg-linear-to-br from-violet-500 to-purple-600 flex items-center justify-center text-white text-xs font-black shrink-0">
-                          {getInitials(sub.student.name)}
+                          {getInitials(sub?.student?.name)}
                         </div>
 
                         <div className="flex-1 min-w-0">
                           {/* Name + status */}
                           <div className="flex items-center gap-2 flex-wrap">
                             <p className="font-bold text-slate-800 text-sm">
-                              {sub.student.name}
+                              {sub?.student?.name}
                             </p>
                             <span
                               className={`text-xs font-bold px-2 py-0.5 rounded-full border ${sc.badge}`}
@@ -723,8 +723,8 @@ function SubmissionsDrawer({
                           </div>
 
                           <p className="text-xs text-slate-400 mt-0.5">
-                            {sub.student.email} ·{" "}
-                            {formatDateTime(sub.submittedAt)}
+                            {sub?.student?.email} ·{" "}
+                            {formatDateTime(sub?.submittedAt)}
                           </p>
 
                           {/* Score bar */}

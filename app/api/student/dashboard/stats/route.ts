@@ -1,15 +1,19 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
+import { desc, eq, sql } from "drizzle-orm";
+import { db } from "@/src/db";
+import {
+  courseEnrollments,
+  courses,
+  quizSubmissions,
+  quizzes,
+  submissions,
+  assignments,
+  announcements,
+  lectureNotes,
+  performances,
+} from "@/src/schema";
 import { verifyToken } from "@/lib/jwt";
-import mongoose from "mongoose";
-import CourseEnrollment from "@/models/Courseenrollment";
-import QuizSubmission from "@/models/Quizsubmission";
-import AssignmentSubmission from "@/models/Assignment";
-import Announcement from "@/models/Announcement";
-import LectureNote from "@/models/Lecturenote";
-import Performance from "@/models/Performance";
 
-// ─── Auth helper ──────────────────────────────────────────────────────────────
 function requireStudent(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   if (!token) return null;
@@ -18,9 +22,15 @@ function requireStudent(req: NextRequest) {
   return user;
 }
 
+const MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+const pct = (score: number | null, max: number | null) =>
+  max && max > 0 && score != null ? (score / max) * 100 : 0;
+
 // ─── GET /api/student/dashboard/stats ─────────────────────────────────────────
-// Returns all student dashboard statistics in a single round-trip.
-// All aggregations run in parallel for performance.
 export async function GET(req: NextRequest) {
   try {
     const auth = requireStudent(req);
@@ -31,330 +41,227 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    await connectDB();
-
-    const studentId = new mongoose.Types.ObjectId(auth.userId);
+    const studentId = auth.userId;
 
     const [
-      enrollmentStats,
-      quizSubmissionStats,
-      assignmentSubmissionStats,
-      performanceData,
-      announcementStats,
-      noteStats,
-      recentActivity,
-      monthlyActivity,
-      topCourses,
-      recentQuizSubmissions,
-      recentAssignmentSubmissions,
+      enrollmentRows,
+      quizSubRows,
+      assignmentSubRows,
+      perfRows,
+      announcementCountRows,
+      noteCountRows,
     ] = await Promise.all([
-      // ── Course enrollments ────────────────────────────────────────────────
-      CourseEnrollment.aggregate([
-        { $match: { student: studentId } },
-        {
-          $group: {
-            _id: null,
-            total: { $sum: 1 },
-            completed: {
-              $sum: { $cond: [{ $eq: ["$isCompleted", true] }, 1, 0] },
-            },
-            inProgress: {
-              $sum: {
-                $cond: [
-                  {
-                    $and: [
-                      { $gt: ["$progressPercent", 0] },
-                      { $lt: ["$progressPercent", 100] },
-                    ],
-                  },
-                  1,
-                  0,
-                ],
-              },
-            },
-            notStarted: {
-              $sum: { $cond: [{ $eq: ["$progressPercent", 0] }, 1, 0] },
-            },
-            totalLessonsCompleted: { $sum: "$completedLessons" },
-            avgProgress: { $avg: "$progressPercent" },
-            certificatesEarned: {
-              $sum: {
-                $cond: [{ $ifNull: ["$certificateId", false] }, 1, 0],
-              },
-            },
+      db
+        .select({
+          id: courseEnrollments.id,
+          courseId: courseEnrollments.courseId,
+          progressPercent: courseEnrollments.progressPercent,
+          isCompleted: courseEnrollments.isCompleted,
+          completedLessons: courseEnrollments.completedLessons,
+          totalLessons: courseEnrollments.totalLessons,
+          certificateId: courseEnrollments.certificateId,
+          enrolledAt: courseEnrollments.enrolledAt,
+          lastAccessedAt: courseEnrollments.lastAccessedAt,
+          course: {
+            title: courses.title,
+            subject: courses.subject,
+            thumbnailUrl: courses.thumbnailUrl,
+            previewVideoId: courses.previewVideoId,
+            totalLessons: courses.totalLessons,
+            totalDurationSeconds: courses.totalDurationSeconds,
+            certificateEnabled: courses.certificateEnabled,
           },
-        },
-      ]),
-
-      // ── Quiz submissions ──────────────────────────────────────────────────
-      QuizSubmission.aggregate([
-        { $match: { student: studentId } },
-        {
-          $group: {
-            _id: null,
-            total: { $sum: 1 },
-            graded: {
-              $sum: { $cond: [{ $eq: ["$isGraded", true] }, 1, 0] },
-            },
-            avgScore: { $avg: "$percentage" },
-            highestScore: { $max: "$percentage" },
-            totalMarksEarned: { $sum: "$totalScore" },
-            passed: {
-              $sum: { $cond: [{ $gte: ["$percentage", 50] }, 1, 0] },
-            },
+        })
+        .from(courseEnrollments)
+        .innerJoin(courses, eq(courseEnrollments.courseId, courses.id))
+        .where(eq(courseEnrollments.studentId, studentId)),
+      db
+        .select({
+          id: quizSubmissions.id,
+          totalScore: quizSubmissions.totalScore,
+          maxPossibleScore: quizSubmissions.maxPossibleScore,
+          gradingStatus: quizSubmissions.gradingStatus,
+          submittedAt: quizSubmissions.submittedAt,
+          timeTakenSeconds: quizSubmissions.timeTakenSeconds,
+          quiz: {
+            title: quizzes.title,
+            subject: quizzes.subject,
+            totalMarks: quizzes.totalMarks,
+            durationMinutes: quizzes.durationMinutes,
           },
-        },
-      ]),
-
-      // ── Assignment submissions ────────────────────────────────────────────
-      AssignmentSubmission.aggregate([
-        { $match: { student: studentId } },
-        {
-          $group: {
-            _id: null,
-            total: { $sum: 1 },
-            graded: {
-              $sum: { $cond: [{ $eq: ["$isGraded", true] }, 1, 0] },
-            },
-            avgScore: { $avg: "$percentage" },
-            highestScore: { $max: "$percentage" },
-            onTime: {
-              $sum: { $cond: [{ $eq: ["$isLate", false] }, 1, 0] },
-            },
-            late: {
-              $sum: { $cond: [{ $eq: ["$isLate", true] }, 1, 0] },
-            },
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(eq(quizSubmissions.studentId, studentId))
+        .orderBy(desc(quizSubmissions.submittedAt)),
+      db
+        .select({
+          id: submissions.id,
+          score: submissions.score,
+          status: submissions.status,
+          isLate: submissions.isLate,
+          submittedAt: submissions.submittedAt,
+          assignment: {
+            title: assignments.title,
+            subject: assignments.subject,
+            totalMarks: assignments.totalMarks,
+            dueDate: assignments.dueDate,
           },
-        },
-      ]),
-
-      // ── Performance record ────────────────────────────────────────────────
-      Performance.findOne({ student: studentId }).lean(),
-
-      // ── Announcement count visible to this student ─────────────────────────
-      // (all published — student sees all)
-      Announcement.countDocuments({ status: "published" }),
-
-      // ── Lecture notes available ────────────────────────────────────────────
-      LectureNote.countDocuments({ status: "published" }),
-
-      // ── Recent activity: last 8 submissions across quizzes + assignments ───
-      Promise.all([
-        QuizSubmission.find({ student: studentId })
-          .sort({ submittedAt: -1 })
-          .limit(5)
-          .populate("quiz", "title subject")
-          .select("quiz percentage isGraded submittedAt totalScore")
-          .lean()
-          .then((docs) =>
-            docs.map((d: any) => ({
-              _id: d._id,
-              title: d.quiz?.title ?? "Quiz",
-              subject: d.quiz?.subject ?? "",
-              score: d.percentage,
-              isGraded: d.isGraded,
-              submittedAt: d.submittedAt,
-              contentType: "quiz",
-            })),
-          ),
-        AssignmentSubmission.find({ student: studentId })
-          .sort({ submittedAt: -1 })
-          .limit(5)
-          .populate("assignment", "title subject")
-          .select("assignment percentage isGraded submittedAt isLate")
-          .lean()
-          .then((docs: any) =>
-            docs.map((d: any) => ({
-              _id: d._id,
-              title: d.assignment?.title ?? "Assignment",
-              subject: d.assignment?.subject ?? "",
-              score: d.percentage,
-              isGraded: d.isGraded,
-              isLate: d.isLate,
-              submittedAt: d.submittedAt,
-              contentType: "assignment",
-            })),
-          ),
-        CourseEnrollment.find({ student: studentId })
-          .sort({ lastAccessedAt: -1 })
-          .limit(4)
-          .populate("course", "title subject thumbnailUrl previewVideoId")
-          .select(
-            "course progressPercent isCompleted lastAccessedAt completedLessons totalLessons",
-          )
-          .lean()
-          .then((docs) =>
-            docs.map((d: any) => ({
-              _id: d._id,
-              title: d.course?.title ?? "Course",
-              subject: d.course?.subject ?? "",
-              thumbnailUrl: d.course?.thumbnailUrl ?? null,
-              previewVideoId: d.course?.previewVideoId ?? null,
-              progress: d.progressPercent,
-              isCompleted: d.isCompleted,
-              completedLessons: d.completedLessons,
-              totalLessons: d.totalLessons,
-              lastAccessedAt: d.lastAccessedAt,
-              contentType: "course",
-            })),
-          ),
-      ]),
-
-      // ── Monthly activity trend — last 6 months ─────────────────────────────
-      Promise.all([
-        QuizSubmission.aggregate([
-          {
-            $match: {
-              student: studentId,
-              submittedAt: {
-                $gte: new Date(new Date().setMonth(new Date().getMonth() - 6)),
-              },
-            },
-          },
-          {
-            $group: {
-              _id: {
-                year: { $year: "$submittedAt" },
-                month: { $month: "$submittedAt" },
-              },
-              count: { $sum: 1 },
-              avgScore: { $avg: "$percentage" },
-            },
-          },
-        ]),
-        AssignmentSubmission.aggregate([
-          {
-            $match: {
-              student: studentId,
-              submittedAt: {
-                $gte: new Date(new Date().setMonth(new Date().getMonth() - 6)),
-              },
-            },
-          },
-          {
-            $group: {
-              _id: {
-                year: { $year: "$submittedAt" },
-                month: { $month: "$submittedAt" },
-              },
-              count: { $sum: 1 },
-              avgScore: { $avg: "$percentage" },
-            },
-          },
-        ]),
-      ]),
-
-      // ── Top 4 enrolled courses with progress ──────────────────────────────
-      CourseEnrollment.find({ student: studentId })
-        .sort({ progressPercent: -1, enrolledAt: -1 })
-        .limit(4)
-        .populate(
-          "course",
-          "title subject thumbnailUrl previewVideoId totalLessons totalDurationSeconds certificateEnabled",
-        )
-        .select(
-          "course progressPercent isCompleted completedLessons totalLessons certificateId enrolledAt lastAccessedAt",
-        )
-        .lean(),
-
-      // ── Recent quiz submissions with scores ────────────────────────────────
-      QuizSubmission.find({ student: studentId })
-        .sort({ submittedAt: -1 })
-        .limit(5)
-        .populate("quiz", "title subject totalMarks durationMinutes")
-        .select(
-          "quiz totalScore percentage isGraded submittedAt timeSpentSeconds",
-        )
-        .lean(),
-
-      // ── Recent assignment submissions ──────────────────────────────────────
-      AssignmentSubmission.find({ student: studentId })
-        .sort({ submittedAt: -1 })
-        .limit(5)
-        .populate("assignment", "title subject totalMarks dueDate")
-        .select(
-          "assignment totalScore percentage isGraded submittedAt isLate grade",
-        )
-        .lean(),
+        })
+        .from(submissions)
+        .innerJoin(assignments, eq(submissions.assignmentId, assignments.id))
+        .where(eq(submissions.studentId, studentId))
+        .orderBy(desc(submissions.submittedAt)),
+      db
+        .select()
+        .from(performances)
+        .where(eq(performances.studentId, studentId))
+        .limit(1),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(announcements)
+        .where(eq(announcements.status, "published")),
+      db.select({ count: sql<number>`count(*)::int` }).from(lectureNotes),
     ]);
 
-    // ── Build monthly trend map ──────────────────────────────────────────────
-    const MONTHS = [
-      "Jan",
-      "Feb",
-      "Mar",
-      "Apr",
-      "May",
-      "Jun",
-      "Jul",
-      "Aug",
-      "Sep",
-      "Oct",
-      "Nov",
-      "Dec",
-    ];
+    // ── Enrollment aggregates ──────────────────────────────────────────────
+    const enrollStats = {
+      total: enrollmentRows.length,
+      completed: enrollmentRows.filter((e) => e.isCompleted).length,
+      inProgress: enrollmentRows.filter(
+        (e) => e.progressPercent > 0 && e.progressPercent < 100,
+      ).length,
+      notStarted: enrollmentRows.filter((e) => e.progressPercent === 0).length,
+      totalLessonsCompleted: enrollmentRows.reduce(
+        (s, e) => s + e.completedLessons,
+        0,
+      ),
+      avgProgress: enrollmentRows.length
+        ? enrollmentRows.reduce((s, e) => s + e.progressPercent, 0) /
+          enrollmentRows.length
+        : 0,
+      certificatesEarned: enrollmentRows.filter((e) => !!e.certificateId).length,
+    };
+
+    // ── Quiz aggregates ────────────────────────────────────────────────────
+    const quizPercents = quizSubRows.map((q) =>
+      pct(q.totalScore, q.maxPossibleScore),
+    );
+    const quizStats = {
+      total: quizSubRows.length,
+      graded: quizSubRows.filter((q) => q.gradingStatus === "graded").length,
+      avgScore: quizPercents.length
+        ? quizPercents.reduce((s, p) => s + p, 0) / quizPercents.length
+        : 0,
+      highestScore: quizPercents.length ? Math.max(...quizPercents) : 0,
+      totalMarksEarned: quizSubRows.reduce((s, q) => s + (q.totalScore ?? 0), 0),
+      passed: quizPercents.filter((p) => p >= 50).length,
+    };
+
+    // ── Assignment aggregates ──────────────────────────────────────────────
+    const assignPercents = assignmentSubRows.map((a) =>
+      pct(a.score, a.assignment.totalMarks),
+    );
+    const assignStats = {
+      total: assignmentSubRows.length,
+      graded: assignmentSubRows.filter((a) => a.status === "graded").length,
+      avgScore: assignPercents.length
+        ? assignPercents.reduce((s, p) => s + p, 0) / assignPercents.length
+        : 0,
+      highestScore: assignPercents.length ? Math.max(...assignPercents) : 0,
+      onTime: assignmentSubRows.filter((a) => !a.isLate).length,
+      late: assignmentSubRows.filter((a) => a.isLate).length,
+    };
+
+    const perf = perfRows[0];
+
+    // ── Monthly trend (last 6 months) ──────────────────────────────────────
     const now = new Date();
     const trendMap = new Map<
       string,
-      {
-        month: string;
-        quizzes: number;
-        assignments: number;
-        avgScore: number;
-        scoreCount: number;
-      }
+      { month: string; quizzes: number; assignments: number; scoreSum: number; scoreCount: number }
     >();
-
     for (let i = 5; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = `${d.getFullYear()}-${d.getMonth() + 1}`;
-      trendMap.set(key, {
+      trendMap.set(`${d.getFullYear()}-${d.getMonth() + 1}`, {
         month: MONTHS[d.getMonth()],
         quizzes: 0,
         assignments: 0,
-        avgScore: 0,
+        scoreSum: 0,
         scoreCount: 0,
       });
     }
-
-    const [quizMonthly, assignmentMonthly] = monthlyActivity;
-
-    for (const q of quizMonthly) {
-      const key = `${q._id.year}-${q._id.month}`;
-      if (trendMap.has(key)) {
-        const e = trendMap.get(key)!;
-        e.quizzes += q.count;
-        e.avgScore += q.avgScore ?? 0;
+    const monthKey = (date: Date) =>
+      `${date.getFullYear()}-${date.getMonth() + 1}`;
+    quizSubRows.forEach((q, idx) => {
+      const e = trendMap.get(monthKey(new Date(q.submittedAt)));
+      if (e) {
+        e.quizzes += 1;
+        e.scoreSum += quizPercents[idx];
         e.scoreCount += 1;
       }
-    }
-    for (const a of assignmentMonthly) {
-      const key = `${a._id.year}-${a._id.month}`;
-      if (trendMap.has(key)) {
-        const e = trendMap.get(key)!;
-        e.assignments += a.count;
-        e.avgScore += a.avgScore ?? 0;
+    });
+    assignmentSubRows.forEach((a, idx) => {
+      const e = trendMap.get(monthKey(new Date(a.submittedAt)));
+      if (e) {
+        e.assignments += 1;
+        e.scoreSum += assignPercents[idx];
         e.scoreCount += 1;
       }
-    }
-
+    });
     const trendData = Array.from(trendMap.values()).map((e) => ({
       month: e.month,
       quizzes: e.quizzes,
       assignments: e.assignments,
-      avgScore: e.scoreCount > 0 ? Math.round(e.avgScore / e.scoreCount) : 0,
+      avgScore: e.scoreCount > 0 ? Math.round(e.scoreSum / e.scoreCount) : 0,
     }));
 
-    // ── Flatten recent activity ──────────────────────────────────────────────
-    const [recentQuizActivity, recentAssignmentActivity, recentCourseActivity] =
-      recentActivity;
+    // ── Recent activity (latest 8) ─────────────────────────────────────────
+    const recentQuizActivity = quizSubRows.slice(0, 5).map((q, idx) => ({
+      _id: q.id,
+      title: q.quiz.title,
+      subject: q.quiz.subject,
+      score: Math.round(quizPercents[idx]),
+      isGraded: q.gradingStatus === "graded",
+      submittedAt: q.submittedAt,
+      contentType: "quiz",
+    }));
+    const recentAssignmentActivity = assignmentSubRows.slice(0, 5).map((a, idx) => ({
+      _id: a.id,
+      title: a.assignment.title,
+      subject: a.assignment.subject,
+      score: Math.round(assignPercents[idx]),
+      isGraded: a.status === "graded",
+      isLate: a.isLate,
+      submittedAt: a.submittedAt,
+      contentType: "assignment",
+    }));
+    const recentCourseActivity = [...enrollmentRows]
+      .sort(
+        (a, b) =>
+          new Date(b.lastAccessedAt ?? 0).getTime() -
+          new Date(a.lastAccessedAt ?? 0).getTime(),
+      )
+      .slice(0, 4)
+      .map((c) => ({
+        _id: c.id,
+        title: c.course.title,
+        subject: c.course.subject,
+        thumbnailUrl: c.course.thumbnailUrl,
+        previewVideoId: c.course.previewVideoId,
+        progress: c.progressPercent,
+        isCompleted: c.isCompleted,
+        completedLessons: c.completedLessons,
+        totalLessons: c.totalLessons,
+        lastAccessedAt: c.lastAccessedAt,
+        submittedAt: c.lastAccessedAt ?? new Date(0),
+        contentType: "course",
+      }));
+
     const allRecent = [
       ...recentQuizActivity,
       ...recentAssignmentActivity,
-      ...recentCourseActivity.map((c: any) => ({
-        ...c,
-        submittedAt: c.lastAccessedAt ?? new Date(0),
-      })),
+      ...recentCourseActivity,
     ]
       .sort(
         (a, b) =>
@@ -363,71 +270,61 @@ export async function GET(req: NextRequest) {
       )
       .slice(0, 8);
 
-    // ── Subject performance breakdown ────────────────────────────────────────
-    const subjectBreakdown = (performanceData as any)?.subjectBreakdown ?? [];
-
-    // ── Compile final response ───────────────────────────────────────────────
-    const enrollStats = enrollmentStats[0] ?? {
-      total: 0,
-      completed: 0,
-      inProgress: 0,
-      notStarted: 0,
-      totalLessonsCompleted: 0,
-      avgProgress: 0,
-      certificatesEarned: 0,
-    };
-
-    const quizStats = quizSubmissionStats[0] ?? {
-      total: 0,
-      graded: 0,
-      avgScore: 0,
-      highestScore: 0,
-      totalMarksEarned: 0,
-      passed: 0,
-    };
-
-    const assignStats = assignmentSubmissionStats[0] ?? {
-      total: 0,
-      graded: 0,
-      avgScore: 0,
-      highestScore: 0,
-      onTime: 0,
-      late: 0,
-    };
-
-    const perf = performanceData as any;
+    // ── Top courses by progress ────────────────────────────────────────────
+    const topCourses = [...enrollmentRows]
+      .sort(
+        (a, b) =>
+          b.progressPercent - a.progressPercent ||
+          new Date(b.enrolledAt).getTime() - new Date(a.enrolledAt).getTime(),
+      )
+      .slice(0, 4)
+      .map((e) => ({
+        enrollmentId: e.id,
+        courseId: e.courseId,
+        title: e.course.title,
+        subject: e.course.subject,
+        thumbnailUrl: e.course.thumbnailUrl,
+        previewVideoId: e.course.previewVideoId,
+        totalLessons: e.course.totalLessons,
+        totalDurationSeconds: e.course.totalDurationSeconds,
+        certificateEnabled: e.course.certificateEnabled,
+        progressPercent: e.progressPercent,
+        completedLessons: e.completedLessons,
+        totalEnrolledLessons: e.totalLessons,
+        isCompleted: e.isCompleted,
+        certificateId: e.certificateId,
+        enrolledAt: e.enrolledAt,
+        lastAccessedAt: e.lastAccessedAt,
+      }));
 
     const response = {
-      // Overview counts
       enrollments: {
         total: enrollStats.total,
         completed: enrollStats.completed,
         inProgress: enrollStats.inProgress,
         notStarted: enrollStats.notStarted,
-        avgProgress: Math.round(enrollStats.avgProgress ?? 0),
+        avgProgress: Math.round(enrollStats.avgProgress),
         totalLessonsCompleted: enrollStats.totalLessonsCompleted,
         certificatesEarned: enrollStats.certificatesEarned,
       },
-
       quizzes: {
         total: quizStats.total,
         graded: quizStats.graded,
         pending: quizStats.total - quizStats.graded,
-        avgScore: Math.round(quizStats.avgScore ?? 0),
-        highestScore: Math.round(quizStats.highestScore ?? 0),
+        avgScore: Math.round(quizStats.avgScore),
+        highestScore: Math.round(quizStats.highestScore),
         passed: quizStats.passed,
         passRate:
           quizStats.total > 0
             ? Math.round((quizStats.passed / quizStats.total) * 100)
             : 0,
       },
-
       assignments: {
         total: assignStats.total,
         graded: assignStats.graded,
         pending: assignStats.total - assignStats.graded,
-        avgScore: Math.round(assignStats.avgScore ?? 0),
-        highestScore: Math.round(assignStats.highestScore ?? 0),
+        avgScore: Math.round(assignStats.avgScore),
+        highestScore: Math.round(assignStats.highestScore),
         onTime: assignStats.onTime,
         late: assignStats.late,
         onTimeRate:
@@ -435,79 +332,46 @@ export async function GET(req: NextRequest) {
             ? Math.round((assignStats.onTime / assignStats.total) * 100)
             : 0,
       },
-
-      // Overall academic performance
       performance: {
         overallPercentage: Math.round(perf?.overallPercentage ?? 0),
         totalActivities: perf?.totalActivities ?? 0,
-        subjectBreakdown,
-        grade: perf?.grade ?? null,
+        subjectBreakdown: perf?.subjectStats ?? [],
+        grade: null,
         lastUpdated: perf?.updatedAt ?? null,
       },
-
-      // Resources available
       resources: {
-        announcements: announcementStats,
-        lectureNotes: noteStats,
+        announcements: announcementCountRows[0]?.count ?? 0,
+        lectureNotes: noteCountRows[0]?.count ?? 0,
       },
-
-      // Chart data
       trendData,
-
-      // Lists for cards
-      topCourses: topCourses.map((e: any) => ({
-        enrollmentId: e._id,
-        courseId: e.course?._id,
-        title: e.course?.title ?? "Untitled Course",
-        subject: e.course?.subject ?? "",
-        thumbnailUrl: e.course?.thumbnailUrl ?? null,
-        previewVideoId: e.course?.previewVideoId ?? null,
-        totalLessons: e.course?.totalLessons ?? 0,
-        totalDurationSeconds: e.course?.totalDurationSeconds ?? 0,
-        certificateEnabled: e.course?.certificateEnabled ?? false,
-        progressPercent: e.progressPercent,
-        completedLessons: e.completedLessons,
-        totalEnrolledLessons: e.totalLessons,
-        isCompleted: e.isCompleted,
-        certificateId: e.certificateId ?? null,
-        enrolledAt: e.enrolledAt,
-        lastAccessedAt: e.lastAccessedAt,
-      })),
-
-      recentQuizSubmissions: recentQuizSubmissions.map((s: any) => ({
-        _id: s._id,
-        quizTitle: s.quiz?.title ?? "Quiz",
-        subject: s.quiz?.subject ?? "",
-        totalMarks: s.quiz?.totalMarks ?? 0,
+      topCourses,
+      recentQuizSubmissions: quizSubRows.slice(0, 5).map((s, idx) => ({
+        _id: s.id,
+        quizTitle: s.quiz.title,
+        subject: s.quiz.subject,
+        totalMarks: s.quiz.totalMarks ?? 0,
         totalScore: s.totalScore ?? 0,
-        percentage: Math.round(s.percentage ?? 0),
-        isGraded: s.isGraded,
+        percentage: Math.round(quizPercents[idx]),
+        isGraded: s.gradingStatus === "graded",
         submittedAt: s.submittedAt,
-        timeSpentSeconds: s.timeSpentSeconds ?? 0,
+        timeSpentSeconds: s.timeTakenSeconds ?? 0,
       })),
-
-      recentAssignmentSubmissions: recentAssignmentSubmissions.map(
-        (s: any) => ({
-          _id: s._id,
-          assignmentTitle: s.assignment?.title ?? "Assignment",
-          subject: s.assignment?.subject ?? "",
-          totalMarks: s.assignment?.totalMarks ?? 0,
-          totalScore: s.totalScore ?? 0,
-          percentage: Math.round(s.percentage ?? 0),
-          isGraded: s.isGraded,
-          isLate: s.isLate,
-          grade: s.grade ?? null,
-          submittedAt: s.submittedAt,
-        }),
-      ),
-
+      recentAssignmentSubmissions: assignmentSubRows.slice(0, 5).map((s, idx) => ({
+        _id: s.id,
+        assignmentTitle: s.assignment.title,
+        subject: s.assignment.subject,
+        totalMarks: s.assignment.totalMarks ?? 0,
+        totalScore: s.score ?? 0,
+        percentage: Math.round(assignPercents[idx]),
+        isGraded: s.status === "graded",
+        isLate: s.isLate,
+        grade: null,
+        submittedAt: s.submittedAt,
+      })),
       recentActivity: allRecent,
     };
 
-    return NextResponse.json(
-      { success: true, data: response },
-      { status: 200 },
-    );
+    return NextResponse.json({ success: true, data: response }, { status: 200 });
   } catch (error: any) {
     console.error("[STUDENT DASHBOARD STATS ERROR]", error);
     return NextResponse.json(
